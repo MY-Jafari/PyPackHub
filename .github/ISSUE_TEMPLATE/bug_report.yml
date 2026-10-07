@@ -1,0 +1,94 @@
+name: Bug report
+description: Something in PyPackHub does not behave the way it should.
+title: "[Bug]: "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **Never paste credentials, tokens, or a private index URL containing
+        them.** PyPackHub redacts secrets from its own logs; issue text is not
+        redacted.
+
+        For anything security-related, use the private reporting link on the
+        previous page instead of this form.
+
+  - type: input
+    id: version
+    attributes:
+      label: PyPackHub version
+      description: The version shown in the About dialog, or the commit you built from.
+      placeholder: "0.1.0 / commit abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version and interpreter path
+      description: The interpreter the application reported, for example from the system information panel.
+      placeholder: "3.13.2 — C:\\Program Files\\Python313\\python.exe"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you clicked or ran, in order. A minimal sequence is worth more than a long description.
+      placeholder: |
+        1. Opened the Packages view in environment X
+        2. Selected package Y
+        3. Chose "Upgrade"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the exact error text if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        From the in-app log panel ("show raw log" / "copy log") or the rotating
+        log file under your platform's application-data directory. Redact
+        anything private before pasting.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This report contains no credentials, tokens, or private index URLs.
+          required: true

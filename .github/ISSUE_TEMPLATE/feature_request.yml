@@ -1,0 +1,65 @@
+name: Feature request
+description: Suggest a capability or an improvement to PyPackHub.
+title: "[Feature]: "
+labels: ["enhancement", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please skim [`docs/DECISIONS.md`](https://github.com/MY-Jafari/PyPackHub/blob/main/docs/DECISIONS.md)
+        and the roadmap in the README — the idea may already be planned, and it
+        helps to know which phase it belongs to.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to get done, and where does the current behaviour get in the way?
+      placeholder: "I manage several conda environments and today I have to ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: Describe the outcome you want, not necessarily the implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including whatever you do today to work around it.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the application does this touch?
+      multiple: true
+      options:
+        - Packages and installs
+        - Environments
+        - Dependency analysis
+        - Security and vulnerability scanning
+        - Snapshots, history and undo
+        - Search and PyPI browsing
+        - Themes, layout and translations
+        - Packaging, installation and updates
+        - Command-line companion
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and the roadmap for this idea.
+          required: true
+        - label: I am not asking the application to weaken a safety guarantee (confirmation dialogs, system-interpreter protection, validation) without a visible warning.
+          required: true

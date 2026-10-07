@@ -1,0 +1,186 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pypackhub"
+version = "0.1.0"
+description = "PyPackHub - a unified, cross-platform desktop GUI for viewing and managing Python packages and environments across pip, uv, conda, poetry, pipx, pipenv and pdm."
+readme = "README.md"
+# PySide6 6.11 declares `requires_python = ">=3.10,<3.15"`, so 3.9 (as the
+# original spec asked for) is not reachable. See docs/DECISIONS.md.
+requires-python = ">=3.10,<3.15"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "PyPackHub contributors" }]
+keywords = [
+  "python",
+  "packaging",
+  "pypi",
+  "pip",
+  "uv",
+  "conda",
+  "virtualenv",
+  "environment-manager",
+  "package-manager",
+  "gui",
+  "qt",
+  "pyside6",
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: MacOS X",
+  "Environment :: Win32 (MS Windows)",
+  "Environment :: X11 Applications :: Qt",
+  "Intended Audience :: Developers",
+  "Natural Language :: English",
+  "Natural Language :: Persian",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Software Development :: User Interfaces",
+  "Topic :: System :: Software Distribution",
+  "Typing :: Typed",
+]
+dependencies = [
+  "PySide6>=6.8,<6.12",
+  "httpx>=0.27",
+  "packaging>=24.0",
+  "platformdirs>=4.2",
+  "keyring>=25.2",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "bandit>=1.7.9",
+  "black>=24.4",
+  "mypy>=1.11",
+  "pip-audit>=2.7",
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "pytest-qt>=4.4",
+  "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/MY-Jafari/PyPackHub"
+Repository = "https://github.com/MY-Jafari/PyPackHub"
+Issues = "https://github.com/MY-Jafari/PyPackHub/issues"
+Changelog = "https://github.com/MY-Jafari/PyPackHub/blob/main/CHANGELOG.md"
+Security = "https://github.com/MY-Jafari/PyPackHub/blob/main/SECURITY.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pypackhub"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/scripts",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/README.md",
+  "/SECURITY.md",
+  "/pyproject.toml",
+]
+
+# --------------------------------------------------------------------------- #
+# Linting and formatting                                                      #
+# --------------------------------------------------------------------------- #
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "W",    # pycodestyle warnings
+  "I",    # isort
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "C4",   # flake8-comprehensions
+  "SIM",  # flake8-simplify
+  "PTH",  # flake8-use-pathlib
+  "RUF",  # ruff-specific
+  "S",    # flake8-bandit (pairs with the standalone bandit run in CI)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"] # a test-suite is built out of assert statements
+
+[tool.ruff.lint.isort]
+known-first-party = ["pypackhub"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+# --------------------------------------------------------------------------- #
+# Type checking                                                               #
+# --------------------------------------------------------------------------- #
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/pypackhub"]
+mypy_path = "src"
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+show_error_codes = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+exclude = ["^src/pypackhub/assets/"]
+
+# The UI layer is typed, but not at the same strictness as the core: Qt's
+# signal/slot plumbing produces a lot of dynamic typing noise.
+[[tool.mypy.overrides]]
+module = ["pypackhub.ui.*"]
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+
+# --------------------------------------------------------------------------- #
+# Tests                                                                       #
+# --------------------------------------------------------------------------- #
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+qt_api = "pyside6"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+  "gui: needs a Qt widget layer (runs with QT_QPA_PLATFORM=offscreen in CI)",
+  "network: talks to PyPI or OSV over the network",
+  "security: part of the security test-suite required by the spec",
+  "slow: takes noticeably long to run",
+]
+filterwarnings = ["error::DeprecationWarning:pypackhub.*"]
+
+[tool.coverage.run]
+branch = true
+source = ["pypackhub"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]
+
+# --------------------------------------------------------------------------- #
+# Security scanning                                                           #
+# --------------------------------------------------------------------------- #
+
+[tool.bandit]
+exclude_dirs = ["tests", "build", "dist"]
