@@ -58,19 +58,52 @@ we deliberately deviate from it, and why.
 | Verification per section | `pytest` plus an offscreen Qt smoke test, with copy-paste instructions for the maintainer to launch the GUI | Nothing is reported as finished without a run that produced output. |
 | Entry points | The `pypackhub` console script is added in section 3, once there is an application to launch | Adding it now would install a command that does nothing. |
 
+## Notes on section 1
+
+**Modules added beyond the spec's list.** The spec's architecture (section 4)
+lists `pypi.py` under core but no shared HTTP layer. One was added as
+`core/net.py`, because "HTTPS only, no `verify=False`, timeouts, size limits"
+is a property of a client, not of a call site - putting it in `pypi.py` would
+leave every later caller free to create a raw `httpx` client and opt out.
+`core/platform_guard.py` moved from section 2 into section 1 for the same
+reason: the Phase 1 acceptance criteria require system-Python protection to be
+verifiable now, and detection is a policy question that section 2's discovery
+logic should consume rather than duplicate.
+
+**Two of the section 11.9 tests are deliberately not in Phase 1.**
+
+| Test | Where it belongs | Why not now |
+| --- | --- | --- |
+| Typosquatting: `reqeusts`, `numpyy`, `pandsa` warn | Phase 2 (`trust.py`, per section 5) | Needs the bundled popular-package list and the trust panel. Building it now would be skipping ahead of the roadmap the spec sets out. |
+| Vulnerability scan renders a mocked OSV response and snapshots before fixing | Phase 4 (`security.py`) | Depends on `snapshots.py`, which arrives in Phase 4. |
+
+Everything else in 11.9 that Phase 1 owns is implemented and tested:
+injection and homoglyph rejection, the static scan, path and deletion
+refusals, the imported-requirements review rules, log redaction, HTTPS-only
+networking and system-Python protection.
+
+**Bandit's B404 and B603 are skipped** in `[tool.bandit]`. They are superseded
+by the project's own scanner, which allows the `subprocess` import in exactly
+one audited module instead of emitting a warning about it everywhere. B602
+(`shell=True`) and B607 (partial executable path) remain enabled.
+
 ## Open items
 
 - `pyproject.toml` uses the placeholder author `PyPackHub contributors`; the real
   name and email still need to be filled in.
 - `SPEC.md` is written in the second person singular and sometimes refers to
   `pyphackhub`; it is kept verbatim in the repository as the product reference.
+- Hashes in imported requirements files are recognised but not enforced;
+  `parse_requirements` flags a hash-pinned line for review instead of quietly
+  applying it as an unpinned install. Enforcement arrives with the
+  `--require-hashes` work in Phase 4.
 
 ## Section plan for Phase 1
 
 | Section | Contents | Gate |
 | --- | --- | --- |
 | 0 | Scaffold: `pyproject.toml`, `src/` layout, lock files, bundled fonts, docs, CI and security workflows | Editable install works, every check passes |
-| 1 | Security core: `runner`, `validation`, `secrets`/redaction, the security test-suite, the project's banned-pattern scanner | All section 11.9 cases pass |
+| 1 | ✅ Security core: `runner`, `validation`, `platform_guard`, `secrets`/redaction, `net`, the security test-suite, the project's banned-pattern scanner | The Phase 1 subset of section 11.9 passes - see the note below |
 | 2 | Core: settings, logging, environment detection and system info, installed-package listing, sizes, PyPI client, task queue, `pip` and `uv` backends | Unit tests with mocked subprocess output, plus a real run against this machine |
 | 3 | UI foundation: design tokens and QSS themes, i18n and RTL direction management, window shell, settings persistence | Offscreen smoke test, live theme and language switching |
 | 4 | Packages view: table, search/filter/sort, detail panel, confirmation dialog, live terminal with cancel, install/uninstall/upgrade/downgrade/upgrade-all | Offscreen smoke test plus a manual run |

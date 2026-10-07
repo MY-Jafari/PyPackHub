@@ -108,9 +108,16 @@ above as the specification we build towards:
 
 | Area | State |
 | --- | --- |
-| Security core (`runner`, `validation`, redaction) | not implemented yet — section 1 |
-| Static security scan in CI | bandit is wired up; the project scanner lands in section 1 |
-| Dependency audit in CI | `pip-audit` runs against the committed lock file |
-| Everything else | not implemented yet |
+| Hardened process execution (`core/runner.py`) | implemented — argument lists, sanitized environment, timeouts, whole-tree kill |
+| Input validation (`core/validation.py`) | implemented — package specs, names, paths, index URLs, imported requirements files |
+| Log and diagnostic redaction (`core/secrets.py`) | implemented, with a filter attached to every log record |
+| Credentials in the OS keychain (`core/secrets.py`) | implemented; nothing is ever written to a config file |
+| HTTPS-only networking (`core/net.py`) | implemented — no `verify` parameter exists, redirects to `http` are refused before they are sent |
+| System-Python and PEP 668 protection (`core/platform_guard.py`) | implemented |
+| Static security scan in CI | implemented — bandit, plus the project's own banned-pattern scanner |
+| Dependency audit in CI | `pip-audit` runs against the committed, hash-pinned lock file |
+| Typosquatting and trust signals | Phase 2 |
+| Vulnerability scanning with snapshots | Phase 4 |
+| Application update verification | Phase 4 |
 
 `docs/DECISIONS.md` tracks which section delivers which part.

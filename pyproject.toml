@@ -120,6 +120,9 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"] # a test-suite is built out of assert statements
+# The security tests deliberately contain fake credentials and /tmp paths:
+# that is the input they feed to the redaction and sanitizing code.
+"tests/security/**" = ["S105", "S108"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["pypackhub"]
@@ -134,7 +137,12 @@ target-version = ["py310"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/pypackhub"]
+# Check as POSIX, not as whatever the developer happens to be sitting on.
+# Otherwise a Windows machine rejects os.killpg and a Linux machine accepts a
+# Windows-only attribute that would explode at runtime; the platform-specific
+# constants the code really needs are accessed through getattr instead.
+platform = "linux"
+files = ["src/pypackhub", "scripts"]
 mypy_path = "src"
 check_untyped_defs = true
 disallow_incomplete_defs = true
@@ -161,7 +169,9 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-qt_api = "pyside6"
+# The Qt binding is selected through the PYTEST_QT_API environment variable
+# rather than an ini key, so that a run without pytest-qt installed (the
+# core-only security job in CI) does not fail on an unknown option.
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
   "gui: needs a Qt widget layer (runs with QT_QPA_PLATFORM=offscreen in CI)",
@@ -184,3 +194,10 @@ exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]
 
 [tool.bandit]
 exclude_dirs = ["tests", "build", "dist"]
+# B404 is "import subprocess" and B603 is "subprocess call - check for untrusted
+# input". Both are superseded by scripts/security_scan.py, which is the stronger
+# control: instead of warning about process spawning everywhere, it allows the
+# subprocess import in exactly one audited module and fails the build anywhere
+# else. B602 (shell=True) and B607 (partial executable path) stay enabled,
+# because those are real defects wherever they appear.
+skips = ["B404", "B603"]

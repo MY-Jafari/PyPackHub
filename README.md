@@ -26,7 +26,7 @@ purpose:
 | Capability | State |
 | --- | --- |
 | Project scaffold, dependency locks, CI, security workflow, docs | ✅ done |
-| Hardened process runner, input validation, log redaction | 🚧 section 1 |
+| Hardened process runner, input validation, log redaction, HTTPS-only client, system-interpreter protection | ✅ done (section 1) |
 | Environment detection, package listing, pip/uv backends | 🚧 section 2 |
 | Theme, translations (English + Persian RTL), window shell | 🚧 section 3 |
 | Package table, install/uninstall/upgrade with confirmations and live log | 🚧 section 4 |
@@ -58,11 +58,13 @@ python -m pip install -e ".[dev]"
 Everything CI runs, runnable locally:
 
 ```bash
-ruff check .            # lint (includes the flake8-bandit rule set)
-black --check .         # formatting
-mypy                    # types (strict in core/, relaxed in ui/)
-pytest                  # tests, using Qt's offscreen platform plugin
-bandit -c pyproject.toml -r src
+ruff check .                        # lint (includes the flake8-bandit rule set)
+black --check .                     # formatting
+mypy                                # types (strict in core/, relaxed in ui/)
+pytest                              # tests, using Qt's offscreen platform plugin
+pytest -m security                  # the security test-suite on its own
+bandit -c pyproject.toml -r src     # static analysis
+python scripts/security_scan.py     # banned patterns, e.g. subprocess outside the runner
 ```
 
 After changing dependencies, regenerate and commit the locks:

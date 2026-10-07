@@ -181,3 +181,6 @@ cython_debug/
 
 # Freebuff agent-tooling state (local to a checkout, not part of the project)
 .freebuff/
+
+# Throwaway environment used to check that the core really runs without Qt
+.testenv/

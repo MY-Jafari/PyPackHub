@@ -36,12 +36,19 @@ ruff check .
 black --check .
 mypy
 pytest
+pytest -m security
 bandit -c pyproject.toml -r src
+python scripts/security_scan.py
 ```
 
 Tests use Qt's offscreen platform plugin (set automatically by
 `tests/conftest.py`), so they work without a display server — including on CI
-runners and over SSH.
+runners and over SSH. Set `PYTEST_QT_API=pyside6` if you have more than one Qt
+binding installed and want to be explicit about which one the Qt tests use.
+
+`scripts/security_scan.py` is the project's own static check. It is AST based,
+so it sees through formatting and through `from os import system` style imports.
+It is the reason there is exactly one `subprocess` import in the codebase.
 
 ## Dependency locks
 

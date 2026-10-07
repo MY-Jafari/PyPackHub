@@ -1,0 +1,567 @@
+"""Hardened process execution - the only place in PyPackHub that spawns a process.
+
+Every subprocess in the application goes through :func:`run`. The guarantees
+this module provides (SPEC section 11.1):
+
+* an argument list, never a command string. There is no ``shell=True`` code
+  path and no parameter that enables one;
+* executables are resolved explicitly. A bare name is looked up through a
+  hardened search path; a relative path is refused outright, so a file planted
+  in a project folder can never be picked up by accident;
+* the child gets a sanitized environment built from an explicit allow-list.
+  ``PYTHONPATH``/``PYTHONHOME``/``VIRTUAL_ENV`` and every ``PIP_*``/``UV_*``
+  variable are stripped, because ``PYTHONPATH`` can shadow the package
+  manager's own modules and the others can silently redirect an install to a
+  different index;
+* every child gets its own process group, so cancelling terminates the whole
+  tree rather than just the parent;
+* timeouts are enforced, and partial output survives both a timeout and a
+  cancel, so the UI always has something to show.
+
+``scripts/security_scan.py`` fails the build if any other module in the project
+imports :mod:`subprocess`, calls ``os.system``/``os.popen``, or passes
+``shell=True``. That scanner, not reviewer discipline, is what keeps this the
+only spawn site.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import re
+import shutil
+import signal
+import subprocess
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO, Final
+
+from pypackhub.core.platform_guard import is_windows_app_alias_stub
+from pypackhub.core.secrets import redact
+
+__all__ = [
+    "DEFAULT_TIMEOUT",
+    "CommandFailedError",
+    "CommandResult",
+    "ExecutableNotFoundError",
+    "InvalidCommandError",
+    "RunnerError",
+    "format_argument",
+    "resolve_executable",
+    "run",
+    "safe_search_path",
+    "sanitized_environment",
+    "terminate_process_tree",
+]
+
+#: Default wall-clock limit for a child process. Long-running operations may
+#: pass a larger value or ``None`` explicitly, but nothing may run forever by
+#: accident.
+DEFAULT_TIMEOUT: Final = 600.0
+
+#: How long a process gets to exit after being asked politely, before it is
+#: killed outright.
+GRACE_PERIOD: Final = 5.0
+
+#: How often the wait loop checks for completion, cancellation and timeout.
+_POLL_INTERVAL: Final = 0.05
+
+_ENV_ALLOWLIST_POSIX: Final = frozenset(
+    {
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LOGNAME",
+        "HOME",
+        "PATH",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "USER",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+    }
+)
+
+_ENV_ALLOWLIST_WINDOWS: Final = frozenset(
+    {
+        "ALLUSERSPROFILE",
+        "APPDATA",
+        "COMSPEC",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LANG",
+        "LOCALAPPDATA",
+        "NUMBER_OF_PROCESSORS",
+        "PATH",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERDOMAIN",
+        "USERNAME",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
+
+#: Stripped even if a future edit adds one of them to an allow-list. Every name
+#: here can change which code a child interpreter loads, or which index a
+#: package manager talks to.
+_ALWAYS_STRIPPED: Final = frozenset(
+    {
+        "PIP_CONFIG_FILE",
+        "PYTHONEXECUTABLE",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "VIRTUAL_ENV",
+    }
+)
+
+#: Variable prefixes that are never inherited, for the same reason.
+_ALWAYS_STRIPPED_PREFIXES: Final = ("PIP_", "UV_", "POETRY_", "CONDA_")
+
+#: Applied after the allow-list, on top of whatever the caller passes in. These
+#: make child output line-buffered, UTF-8 and non-interactive, which is what a
+#: GUI needs to show a live log and to never hang on a prompt.
+_BASELINE_ENV: Final = {
+    "NO_COLOR": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "PIP_NO_COLOR": "1",
+    "PIP_NO_INPUT": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUNBUFFERED": "1",
+}
+
+_QUOTING_PATTERN: Final = re.compile(r"""[\s"'\\$`|&;<>()*?{}\[\]~!#^=]""")
+_PATH_SEPARATORS: Final = ("/", "\\")
+
+
+class RunnerError(RuntimeError):
+    """Base class for every failure raised by this module."""
+
+
+class InvalidCommandError(RunnerError):
+    """The command itself is malformed or refused by policy."""
+
+
+class ExecutableNotFoundError(RunnerError):
+    """The requested program could not be resolved to a real executable."""
+
+
+class CommandFailedError(RunnerError):
+    """Raised by :func:`run` with ``check=True`` when a command did not succeed."""
+
+    def __init__(self, result: CommandResult) -> None:
+        super().__init__(
+            f"command failed with exit code {result.returncode}: {result.display_command()}"
+        )
+        self.result = result
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    """Everything the caller needs to explain what happened, and why."""
+
+    argv: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+    duration: float
+    timed_out: bool = False
+    cancelled: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0 and not self.timed_out and not self.cancelled
+
+    @property
+    def output(self) -> str:
+        """stdout and stderr combined, for the log panel."""
+
+        if not self.stderr:
+            return self.stdout
+        if not self.stdout:
+            return self.stderr
+
+        return f"{self.stdout}\n{self.stderr}"
+
+    def display_command(self) -> str:
+        """Render the command for a log line or a confirmation dialog.
+
+        Redacted and derived from :attr:`argv` itself, so the text a user
+        confirms is always the text that was executed - never a re-rendering
+        that could drift from it.
+        """
+
+        return redact(" ".join(format_argument(argument) for argument in self.argv))
+
+
+def format_argument(argument: str) -> str:
+    """Quote one argument for display only.
+
+    This is deliberately not a shell escaping routine: nothing here is ever
+    handed to a shell. The goal is a faithful, readable rendering of the exact
+    argument list that was executed.
+    """
+
+    if argument and not _QUOTING_PATTERN.search(argument):
+        return argument
+
+    return '"' + argument.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def safe_search_path(
+    path: str | None = None,
+    *,
+    lookup_path: str | None = None,
+) -> str:
+    """Return the search path with relative and empty entries removed.
+
+    A POSIX ``PATH`` treats an empty entry as "the current directory", and a
+    relative entry is just as dangerous: both let a file that happens to sit in
+    whatever folder the user opened shadow a real tool.
+    """
+
+    raw = os.environ.get("PATH", "") if lookup_path is None else lookup_path
+    separator = os.pathsep if path is None else path
+    entries = [entry for entry in raw.split(separator) if entry and Path(entry).is_absolute()]
+
+    if not entries:
+        # Falling back to an empty search path would silently break every tool
+        # lookup; an empty string keeps the failure explicit and local.
+        return ""
+
+    return separator.join(entries)
+
+
+def sanitized_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build the environment a child process is allowed to see.
+
+    Built from an allow-list rather than by removing known-bad names: a
+    variable nobody thought of is absent by default instead of inherited by
+    accident. ``extra`` is trusted input from our own code and is applied last.
+    """
+
+    allowlist = _ENV_ALLOWLIST_WINDOWS if os.name == "nt" else _ENV_ALLOWLIST_POSIX
+
+    environment: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper not in allowlist:
+            continue
+        if upper in _ALWAYS_STRIPPED or upper.startswith(_ALWAYS_STRIPPED_PREFIXES):
+            continue
+        environment[key] = value
+
+    environment["PATH"] = safe_search_path()
+    environment.update(_BASELINE_ENV)
+
+    if extra:
+        for key, value in extra.items():
+            if "\x00" in key or "\x00" in value:
+                raise InvalidCommandError(f"environment variable {key!r} contains a NUL byte")
+            environment[key] = value
+
+    return environment
+
+
+def resolve_executable(name: str, *, search_path: str | None = None) -> str:
+    """Resolve a program name to an absolute path, or refuse.
+
+    A value containing a path separator is rejected rather than resolved:
+    ``./pip`` or ``../scripts/pip`` must never be executable through this API.
+    Callers that mean a specific file pass its absolute path.
+    """
+
+    if not name:
+        raise InvalidCommandError("executable name is empty")
+
+    if name.startswith("-"):
+        raise InvalidCommandError(f"executable name may not start with '-': {name!r}")
+
+    # An absolute path is already unambiguous and is used as given. Everything
+    # else has to be a bare name: a relative path would resolve against the
+    # current working directory, which is exactly the shadowing we refuse.
+    if Path(name).is_absolute():
+        if not Path(name).is_file():
+            raise ExecutableNotFoundError(f"{name!r} does not exist")
+        if is_windows_app_alias_stub(Path(name)):
+            raise ExecutableNotFoundError(
+                f"{name!r} is a Windows App Execution Alias stub, not a real executable"
+            )
+        return name
+
+    if any(separator in name for separator in _PATH_SEPARATORS):
+        raise InvalidCommandError(
+            f"{name!r} looks like a path; pass an absolute path or a bare program name"
+        )
+
+    resolved = shutil.which(
+        name, path=search_path if search_path is not None else safe_search_path()
+    )
+
+    if resolved is None:
+        raise ExecutableNotFoundError(f"could not find {name!r} on the search path")
+
+    if is_windows_app_alias_stub(Path(resolved)):
+        raise ExecutableNotFoundError(
+            f"{resolved!r} is a Windows App Execution Alias stub, not a real executable"
+        )
+
+    return resolved
+
+
+def validate_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    """Normalise and sanity-check an argument list before it is executed."""
+
+    arguments = tuple(argv)
+
+    if not arguments:
+        raise InvalidCommandError("argument list is empty")
+
+    for index, argument in enumerate(arguments):
+        if not isinstance(argument, str):  # pragma: no cover - defensive, typed callers
+            raise InvalidCommandError(f"argument {index} is not a string")
+        if "\x00" in argument:
+            raise InvalidCommandError(f"argument {index} contains a NUL byte")
+        if index == 0 and not argument:
+            raise InvalidCommandError("program name is empty")
+
+    return arguments
+
+
+def terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate a process and everything it spawned."""
+
+    if process.poll() is not None:
+        return
+
+    if os.name == "nt":
+        _terminate_windows_tree(process)
+    else:
+        _terminate_posix_tree(process)
+
+
+def _terminate_posix_tree(process: subprocess.Popen[str]) -> None:
+    try:
+        group = os.getpgid(process.pid)
+    except (ProcessLookupError, PermissionError):  # pragma: no cover - race on exit
+        process.kill()
+        return
+
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):  # pragma: no cover - race on exit
+        process.kill()
+        return
+
+    try:
+        process.wait(timeout=GRACE_PERIOD)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):  # pragma: no cover - race on exit
+        process.kill()
+
+
+def _terminate_windows_tree(process: subprocess.Popen[str]) -> None:
+    # `taskkill /T` is the only reliable way to take down a whole tree on
+    # Windows; the console's own job objects are not available from Python.
+    taskkill = shutil.which("taskkill")
+
+    if taskkill is not None:
+        # Best effort: if the tree is already gone, that is the outcome we
+        # wanted, and the wait below is what reports anything that went wrong.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(  # noqa: S603 - fixed argument list, resolved absolute path
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=GRACE_PERIOD,
+                check=False,
+            )
+
+    try:
+        process.wait(timeout=GRACE_PERIOD)
+    except subprocess.TimeoutExpired:  # pragma: no cover - best effort
+        process.kill()
+
+
+def _start_reader(
+    stream: IO[str] | None,
+    sink: list[str],
+    callback: Callable[[str], None] | None,
+) -> threading.Thread:
+    """Drain one of the child's pipes on its own thread.
+
+    The pipe must be drained whether or not the caller wants a callback:
+    a full pipe buffer would block the child forever.
+    """
+
+    def pump() -> None:
+        if stream is None:  # pragma: no cover - both pipes are always created
+            return
+
+        try:
+            for line in stream:
+                sink.append(line)
+                if callback is not None:
+                    # A listener that raises must not stop the pipe from being
+                    # drained: a full pipe buffer would block the child forever,
+                    # which is a hang the user cannot cancel out of.
+                    with contextlib.suppress(Exception):
+                        callback(line.rstrip("\r\n"))
+        except (OSError, ValueError):  # pragma: no cover - stream closed under us
+            pass
+
+    thread = threading.Thread(target=pump, name="pypackhub-runner-reader", daemon=True)
+    thread.start()
+
+    return thread
+
+
+@dataclass(slots=True)
+class _OutputHandlers:
+    stdout: Callable[[str], None] | None = None
+    stderr: Callable[[str], None] | None = None
+
+
+def run(
+    argv: Sequence[str],
+    *,
+    timeout: float | None = DEFAULT_TIMEOUT,
+    cwd: Path | str | None = None,
+    env: Mapping[str, str] | None = None,
+    cancel: threading.Event | None = None,
+    stdin_text: str | None = None,
+    on_stdout: Callable[[str], None] | None = None,
+    on_stderr: Callable[[str], None] | None = None,
+    check: bool = False,
+) -> CommandResult:
+    """Run a command and return its result.
+
+    The result is always returned - a timeout or a cancel is reported through
+    :attr:`CommandResult.timed_out` / :attr:`CommandResult.cancelled` with
+    whatever output was produced, so the UI can explain what happened instead
+    of losing the log. Pass ``check=True`` to also raise
+    :class:`CommandFailedError` for a non-zero exit status.
+    """
+
+    arguments = validate_argv(argv)
+    program = arguments[0]
+
+    # An absolute path is used as given; a bare name is looked up through a
+    # hardened search path. Either way the child never inherits a relative path
+    # or a PATH entry that points into the current working directory.
+    executable = resolve_executable(program)
+
+    handlers = _OutputHandlers(stdout=on_stdout, stderr=on_stderr)
+    environment = sanitized_environment(env)
+    creationflags = 0
+    start_new_session = False
+
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess, "CREATE_NO_WINDOW", 0
+        )
+    else:
+        start_new_session = True
+
+    command = (executable, *arguments[1:])
+    started = time.monotonic()
+
+    process = subprocess.Popen(  # noqa: S603 - argument list only, resolved executable
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        env=environment,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        close_fds=True,
+        creationflags=creationflags,
+        start_new_session=start_new_session,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    readers = [
+        _start_reader(process.stdout, stdout_lines, handlers.stdout),
+        _start_reader(process.stderr, stderr_lines, handlers.stderr),
+    ]
+
+    if stdin_text is not None and process.stdin is not None:
+        try:
+            process.stdin.write(stdin_text)
+        except OSError:  # pragma: no cover - child closed stdin early
+            pass
+        finally:
+            with contextlib.suppress(OSError):  # pragma: no cover - already closed
+                process.stdin.close()
+
+    deadline = None if timeout is None else started + timeout
+    timed_out = False
+    cancelled = False
+
+    try:
+        while True:
+            if process.poll() is not None:
+                break
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                terminate_process_tree(process)
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                terminate_process_tree(process)
+                break
+            time.sleep(_POLL_INTERVAL)
+    finally:
+        try:
+            process.wait(timeout=GRACE_PERIOD)
+        except subprocess.TimeoutExpired:  # pragma: no cover - kill() already attempted
+            process.kill()
+            process.wait()
+        for reader in readers:
+            reader.join(timeout=GRACE_PERIOD)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+    result = CommandResult(
+        argv=command,
+        returncode=process.returncode if process.returncode is not None else -1,
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_lines),
+        duration=time.monotonic() - started,
+        timed_out=timed_out,
+        cancelled=cancelled,
+    )
+
+    if check and not result.ok:
+        raise CommandFailedError(result)
+
+    return result
