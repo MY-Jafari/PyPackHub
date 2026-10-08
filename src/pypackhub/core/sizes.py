@@ -34,7 +34,7 @@ class PackageSize:
 
     @property
     def size_human(self) -> str:
-        value = self.size_bytes
+        value = float(self.size_bytes)
         for unit in ("B", "KB", "MB", "GB"):
             if value < 1024 or unit == "GB":
                 break
@@ -63,10 +63,10 @@ def _top_paths(paths: Collection[Path], top: int = 5) -> tuple[tuple[str, int], 
         if not path.is_file():
             continue
         try:
-            parent = path.parent.relative_to(path.parent.parent)
+            parent = str(path.parent.relative_to(path.parent.parent))
         except ValueError:
             parent = path.parent.name
-        by_dir[str(parent)] = by_dir.get(str(parent), 0) + 1
+        by_dir[parent] = by_dir.get(parent, 0) + 1
 
     ranked = sorted(by_dir.items(), key=lambda item: item[1], reverse=True)
     return tuple(ranked[:top])

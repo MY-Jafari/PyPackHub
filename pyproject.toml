@@ -57,6 +57,9 @@ dependencies = [
   "tomli>=2.0; python_version < '3.11'",
 ]
 
+[project.scripts]
+pypackhub = "pypackhub.ui.app:run"
+
 [project.optional-dependencies]
 dev = [
   "bandit>=1.7.9",
@@ -123,6 +126,11 @@ select = [
 # The security tests deliberately contain fake credentials and /tmp paths:
 # that is the input they feed to the redaction and sanitizing code.
 "tests/security/**" = ["S105", "S108"]
+# The Persian translation table is written in Persian script, where several
+# letters are visually ambiguous with Latin ones. RUF001-003 exist to catch a
+# Latin word mistaken for a Cyrillic lookalike; in a language file the scripts
+# are the point, so the check is disabled exactly there.
+"src/pypackhub/ui/i18n/translations.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["pypackhub"]

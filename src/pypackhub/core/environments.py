@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -65,7 +66,9 @@ class ListedEnvironment:
     prefix: Path
     facts: InterpreterFacts
     source: EnvironmentSource
-    first_seen: float = field(default_factory=os.path.getmtime)
+    #: When this environment was first seen, in wall-clock seconds. "Now" is the
+    #: honest default for an environment discovered in this pass.
+    first_seen: float = field(default_factory=time.time)
 
 
 @dataclass(frozen=True, slots=True)

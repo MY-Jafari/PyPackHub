@@ -80,8 +80,7 @@ class Backend(ABC):
 
     @property
     @abstractmethod
-    def capability(self) -> BackendCapability:
-        ...
+    def capability(self) -> BackendCapability: ...
 
     @property
     @abstractmethod

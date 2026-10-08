@@ -185,10 +185,15 @@ class TaskManager:
     def cancel_all(self) -> int:
         """Cancel every currently running task."""
         with self._lock:
-            cancelled = 0
-            for cancel in self._cancel.values():
-                if cancel.set():
-                    cancelled += 1
+            pending = list(self._cancel.values())
+
+        # ``threading.Event.set()`` returns None, so the count comes from the
+        # tasks that were actually cancelled, not from the return value.
+        cancelled = 0
+        for cancel in pending:
+            if not cancel.is_set():
+                cancel.set()
+                cancelled += 1
 
         return cancelled
 

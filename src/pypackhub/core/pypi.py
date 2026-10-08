@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import monotonic
+from time import monotonic
 from typing import Any, Final
 
 from pypackhub.core.net import HttpClient, HttpError, ResponseTooLargeError, is_offline_error
@@ -112,6 +112,12 @@ class PyPIClient:
     def close(self) -> None:
         self._http.close()
 
+    def __enter__(self) -> PyPIClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
     def info(self, package: str) -> PackageInfo:
         """Return PyPI info for *package*, using cache first, then the network."""
         canonical = validate_package_name(package)
@@ -127,7 +133,7 @@ class PyPIClient:
         info = self.info(package)
 
         if info.error:
-            return PackageMeta(info=info)
+            return PackageMeta(info=info, versions=())
 
         versions = self._fetch_versions(info.name)
         pydist = self._fetch_distributions(info.name, info.latest_version)
@@ -151,33 +157,15 @@ class PyPIClient:
 
         try:
             payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)
-        except is_offline_error:
-            return PackageInfo(
-                name=name,
-                canonical_name=name,
-                latest_version="",
-                last_checked=monotonic(),
-                fetched=False,
-                error="offline",
-            )
         except ResponseTooLargeError:
-            return PackageInfo(
-                name=name,
-                canonical_name=name,
-                latest_version="",
-                last_checked=monotonic(),
-                fetched=True,
-                error="response too large",
-            )
+            return self._failed_info(name, "response too large", fetched=True)
         except HttpError as error:
-            return PackageInfo(
-                name=name,
-                canonical_name=name,
-                latest_version="",
-                last_checked=monotonic(),
-                fetched=True,
-                error=str(error),
-            )
+            # Being offline is an expected state, not a misconfiguration, and the
+            # UI says so differently: nothing was fetched, so it can retry later
+            # without implying the index or the URL is wrong.
+            if is_offline_error(error):
+                return self._failed_info(name, "offline", fetched=False)
+            return self._failed_info(name, str(error), fetched=True)
 
         info = self._parse_json_info(name, payload)
         info.last_checked = monotonic()
@@ -185,24 +173,34 @@ class PyPIClient:
         self._cache.set(info)
         return info
 
+    @staticmethod
+    def _failed_info(name: str, reason: str, *, fetched: bool) -> PackageInfo:
+        """A cached-looking answer for a lookup that could not be completed."""
+        return PackageInfo(
+            name=name,
+            canonical_name=name,
+            latest_version="",
+            last_checked=monotonic(),
+            fetched=fetched,
+            error=reason,
+        )
+
     def _fetch_versions(self, name: str) -> tuple[str, ...]:
         url = f"{PYPI_JSON_BASE}/{name}/json"
 
         try:
             payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)
-        except (HttpError, ResponseTooLargeError, is_offline_error):
+        except (HttpError, ResponseTooLargeError):
             return ()
 
         return tuple(sorted(self._parse_json_versions(payload), reverse=True))
 
-    def _fetch_distributions(
-        self, name: str, version: str
-    ) -> dict[str, Any]:
+    def _fetch_distributions(self, name: str, version: str) -> dict[str, Any]:
         url = f"{PYPI_JSON_BASE}/{name}/{version}/json"
 
         try:
             payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)
-        except (HttpError, ResponseTooLargeError, is_offline_error):
+        except (HttpError, ResponseTooLargeError):
             return {}
 
         if not isinstance(payload, dict):

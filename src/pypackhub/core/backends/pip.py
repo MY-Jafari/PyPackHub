@@ -12,6 +12,7 @@ run the right pip without guessing from the search path.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from pypackhub.core.backends.base import (
@@ -22,9 +23,11 @@ from pypackhub.core.backends.base import (
     UnsupportedBackendError,
 )
 from pypackhub.core.platform_guard import InterpreterFacts
-from pypackhub.core.runner import CommandFailedError, run
+from pypackhub.core.runner import CommandFailedError, ExecutableNotFoundError, run
 
 __all__ = ["PipBackend", "find_pip"]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def find_pip(prefix: Path | None = None) -> Path:
@@ -43,12 +46,14 @@ def find_pip(prefix: Path | None = None) -> Path:
                 return candidate
 
     # Fall back to whichever pip the user can run, preferring a version-aware
-    # name before the bare one.
-    for name in "pip3", "pip":
+    # name before the bare one. A missing candidate is the normal case, not an
+    # error: it is recorded at debug level so a diagnostic can explain which
+    # names were tried.
+    for name in ("pip3", "pip"):
         try:
             return Path(resolve_executable(name))
-        except Exception:
-            continue
+        except ExecutableNotFoundError:
+            _LOGGER.debug("%s is not resolvable as an executable", name)
 
     raise UnsupportedBackendError("pip could not be found")
 

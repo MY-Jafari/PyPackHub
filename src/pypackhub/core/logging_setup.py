@@ -12,7 +12,9 @@ does its own per-session logging and never imports this module.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -39,10 +41,18 @@ _logger_configured: bool = False
 
 
 def ensure_log_directory() -> Path:
-    """Return the directory logs should be written into, creating it if needed."""
-    directory = Path(user_data_dir(APP_ID, create_file=False, ensure_exists=True))
+    """Return the directory logs should be written into, creating it if needed.
+
+    The directory lives under the same application data directory as the
+    settings, and is restricted to the user where the operating system supports
+    it (SPEC section 11.6).
+    """
+    directory = Path(user_data_dir(APP_ID))
     log_directory = directory / "logs"
     log_directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        with contextlib.suppress(OSError):
+            log_directory.chmod(0o700)
     return log_directory
 
 

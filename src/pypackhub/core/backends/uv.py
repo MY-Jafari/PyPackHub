@@ -12,6 +12,7 @@ the right uv and read the right project metadata when that matters.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from pypackhub.core.backends.base import (
@@ -22,22 +23,22 @@ from pypackhub.core.backends.base import (
     UnsupportedBackendError,
 )
 from pypackhub.core.platform_guard import InterpreterFacts
-from pypackhub.core.runner import CommandFailedError, run
+from pypackhub.core.runner import CommandFailedError, ExecutableNotFoundError, run
 
 __all__ = ["UvBackend", "find_uv"]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def find_uv() -> Path:
     """Return the uv executable this backend would run, or raise."""
     from pypackhub.core.runner import resolve_executable
 
-    for name in "uv":
-        try:
-            return Path(resolve_executable(name))
-        except Exception:
-            continue
-
-    raise UnsupportedBackendError("uv could not be found")
+    try:
+        return Path(resolve_executable("uv"))
+    except ExecutableNotFoundError:
+        _LOGGER.debug("uv is not resolvable as an executable")
+        raise UnsupportedBackendError("uv could not be found") from None
 
 
 class UvBackend(Backend):

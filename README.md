@@ -27,8 +27,8 @@ purpose:
 | --- | --- |
 | Project scaffold, dependency locks, CI, security workflow, docs | ✅ done |
 | Hardened process runner, input validation, log redaction, HTTPS-only client, system-interpreter protection | ✅ done (section 1) |
-| Environment detection, package listing, pip/uv backends | 🚧 section 2 |
-| Theme, translations (English + Persian RTL), window shell | 🚧 section 3 |
+| Environment detection, package listing, pip/uv backends | ✅ done (section 2) |
+| Theme, translations (English + Persian RTL), window shell | ✅ done (section 3) |
 | Package table, install/uninstall/upgrade with confirmations and live log | 🚧 section 4 |
 | Settings, PEP 668 protection flow, Phase 1 acceptance | 🚧 section 5 |
 | Dependency graph, security scanning, snapshots, environment management | 📋 later phases |
@@ -52,6 +52,17 @@ python -m pip install -e ".[dev]"
 ```
 
 `uv` users can replace the last line with `uv venv && uv pip install -e ".[dev]"`.
+
+Then launch it:
+
+```bash
+pypackhub           # the console script
+python -m pypackhub # the same entry point, without relying on PATH
+```
+
+The window is the shell only: navigation, the theme and the language switches,
+and the settings that persist them. The package table itself lands in section 4,
+so most destinations open a placeholder that names the phase which builds them.
 
 ## Development
 

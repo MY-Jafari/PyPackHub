@@ -12,6 +12,8 @@ the UI layer so the core can be exercised without a display server.
 
 from __future__ import annotations
 
+import contextlib
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -116,10 +118,26 @@ def validate_settings(settings: AppSettings) -> AppSettings:
 
 
 def settings_data_directory() -> Path:
-    """Where the application keeps its persistent settings and caches."""
-    return Path(user_data_dir(APP_ID, create_file=False, ensure_exists=True))
+    """Where the application keeps its persistent settings and caches.
+
+    The directory is created on first use and, where the operating system
+    supports it, restricted to the user (SPEC section 11.6: local settings,
+    snapshots, cache and logs live in ``platformdirs`` directories with
+    user-only permissions).
+    """
+    directory = Path(user_data_dir(APP_ID))
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        with contextlib.suppress(OSError):
+            directory.chmod(0o700)
+    return directory
 
 
 def settings_file() -> Path:
-    """Legacy path for a settings file, kept for the UI layer's QSettings bridge."""
+    """The INI file the UI layer's QSettings bridge reads and writes.
+
+    It lives in :func:`settings_data_directory` rather than in the platform's
+    native registry so that the location is the same one documented for caches
+    and logs, and so that it can carry user-only permissions.
+    """
     return settings_data_directory() / "settings.ini"
