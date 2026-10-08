@@ -16,9 +16,12 @@ import logging
 from pathlib import Path
 
 from pypackhub.core.backends.base import (
+    ActionKind,
     Backend,
     BackendCapability,
+    CommandPlan,
     InstalledPackage,
+    PackageAction,
     PackageListing,
     UnsupportedBackendError,
 )
@@ -59,11 +62,35 @@ def find_pip(prefix: Path | None = None) -> Path:
 
 
 class PipBackend(Backend):
-    """A pip backend bound to one interpreter or virtual environment."""
+    """A pip backend bound to one interpreter or virtual environment.
 
-    def __init__(self, *, executable: Path | None = None, prefix: Path | None = None) -> None:
+    When the interpreter of the target environment is known, pip is run as
+    ``<interpreter> -m pip ...`` rather than by looking up a ``pip`` script on
+    the search path. That matters for correctness, not just for tidiness: a bare
+    ``pip`` from ``PATH`` belongs to whichever environment installed it, so
+    ``pip list`` would report the wrong packages and ``pip install`` would write
+    into the wrong place.
+    """
+
+    def __init__(
+        self,
+        *,
+        executable: Path | None = None,
+        prefix: Path | None = None,
+        python: Path | None = None,
+    ) -> None:
         self._executable = executable
         self._prefix = prefix
+        self._python = python
+
+    def _command(self, *arguments: str) -> list[str]:
+        """The prefix that targets the right interpreter, then the arguments."""
+        return [*self._command_prefix(), *arguments]
+
+    def _command_prefix(self) -> list[str]:
+        if self._python is not None:
+            return [str(self._python), "-m", "pip"]
+        return [str(self._executable or self.executable_path())]
 
     @property
     def capability(self) -> BackendCapability:
@@ -73,8 +100,11 @@ class PipBackend(Backend):
             can_install=True,
             can_uninstall=True,
             can_upgrade=True,
+            can_downgrade=True,
+            can_upgrade_all=True,
             can_search=False,
             can_show_sizes=True,
+            can_install_user=True,
             need_confirmation=True,
         )
 
@@ -83,10 +113,61 @@ class PipBackend(Backend):
         return "pip"
 
     def executable_path(self) -> Path:
+        # With a bound interpreter, that interpreter *is* the executable this
+        # backend runs. Otherwise fall back to a pip script that belongs to the
+        # prefix, and only then to whatever pip the search path offers.
+        if self._python is not None:
+            return self._python
+
         try:
             return find_pip(self._prefix)
         except UnsupportedBackendError as error:
             raise UnsupportedBackendError("pip is not available on this system") from error
+
+    # ------------------------------------------------------------------
+    # Changing actions
+    # ------------------------------------------------------------------
+
+    def plan(self, action: PackageAction) -> CommandPlan:
+        """Build the pip argument list for a validated action.
+
+        Every command separates its options from the package arguments with
+        ``--`` (SPEC section 11.1), so a name or spec can never be read as an
+        option even if the validator were to let something through.
+        """
+        self._require(action)
+
+        if action.kind is ActionKind.UNINSTALL:
+            argv = self._command("uninstall", "--yes", "--", *action.names)
+        elif action.kind is ActionKind.INSTALL:
+            argv = self._command("install", *self._with_user(action, []), "--", *action.specs)
+        elif action.kind is ActionKind.UPGRADE:
+            argv = self._command(
+                "install",
+                "--upgrade",
+                *self._with_user(action, []),
+                "--",
+                *action.names,
+            )
+        elif action.kind is ActionKind.DOWNGRADE:
+            argv = self._command(
+                "install", *self._with_user(action, []), "--", *self._pinned_specs(action)
+            )
+        else:
+            argv = self._command(
+                "install",
+                "--upgrade",
+                *self._with_user(action, []),
+                "--",
+                *action.specs,
+            )
+
+        return CommandPlan(
+            argv=tuple(argv),
+            action=action,
+            label=f"pip {action.kind.value}",
+            backend="pip",
+        )
 
     def list_packages(
         self,
@@ -95,13 +176,8 @@ class PipBackend(Backend):
         facts: InterpreterFacts | None = None,
     ) -> PackageListing:
         """List installed packages for one environment using ``pip list --format=json``."""
-        executable = self._executable or self.executable_path()
-
         try:
-            result = run(
-                [str(executable), "list", "--format=json"],
-                timeout=120.0,
-            )
+            result = run(self._command("list", "--format=json"), timeout=120.0)
         except CommandFailedError as error:
             return PackageListing(
                 environment=environment,

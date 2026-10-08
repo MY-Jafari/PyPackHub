@@ -16,10 +16,14 @@ import logging
 from pathlib import Path
 
 from pypackhub.core.backends.base import (
+    ActionKind,
     Backend,
     BackendCapability,
+    CommandPlan,
     InstalledPackage,
+    PackageAction,
     PackageListing,
+    UnsupportedActionError,
     UnsupportedBackendError,
 )
 from pypackhub.core.platform_guard import InterpreterFacts
@@ -56,8 +60,15 @@ class UvBackend(Backend):
             can_install=True,
             can_uninstall=True,
             can_upgrade=True,
+            can_downgrade=True,
+            can_upgrade_all=True,
             can_search=False,
             can_show_sizes=True,
+            # uv installs into a specific interpreter, never into the user site
+            # directory: there is no --user flag to honor (SPEC section 2 asks
+            # for --user support, which is why pip remains the default when a
+            # user asks for it).
+            can_install_user=False,
             need_confirmation=True,
         )
 
@@ -71,6 +82,67 @@ class UvBackend(Backend):
         except UnsupportedBackendError as error:
             raise UnsupportedBackendError("uv is not available on this system") from error
 
+    # ------------------------------------------------------------------
+    # Changing actions
+    # ------------------------------------------------------------------
+
+    def plan(self, action: PackageAction) -> CommandPlan:
+        """Build the uv argument list for a validated action.
+
+        uv is told which interpreter to act on with ``--python`` rather than by
+        relying on an activated environment, so the target is always explicit and
+        never depends on the shell the application inherited.
+        """
+        if action.user:
+            raise UnsupportedActionError(
+                "uv cannot install into the user site directory; use pip for --user installs"
+            )
+
+        self._require(action)
+        executable = str(self._executable or self.executable_path())
+        target = ["--python", str(self._python)] if self._python is not None else []
+
+        if action.kind is ActionKind.UNINSTALL:
+            argv = [executable, "pip", "uninstall", *target, "--", *action.names]
+        elif action.kind is ActionKind.INSTALL:
+            argv = [executable, "pip", "install", *target, "--", *action.specs]
+        elif action.kind is ActionKind.UPGRADE:
+            argv = [
+                executable,
+                "pip",
+                "install",
+                "--upgrade",
+                *target,
+                "--",
+                *action.names,
+            ]
+        elif action.kind is ActionKind.DOWNGRADE:
+            argv = [
+                executable,
+                "pip",
+                "install",
+                *target,
+                "--",
+                *self._pinned_specs(action),
+            ]
+        else:
+            argv = [
+                executable,
+                "pip",
+                "install",
+                "--upgrade",
+                *target,
+                "--",
+                *action.specs,
+            ]
+
+        return CommandPlan(
+            argv=tuple(argv),
+            action=action,
+            label=f"uv {action.kind.value}",
+            backend="uv",
+        )
+
     def list_packages(
         self,
         environment: Path,
@@ -79,10 +151,11 @@ class UvBackend(Backend):
     ) -> PackageListing:
         """List installed packages for one environment using ``uv pip list --format json``."""
         executable = self._executable or self.executable_path()
+        target = ["--python", str(self._python)] if self._python is not None else []
 
         try:
             result = run(
-                [str(executable), "pip", "list", "--format", "json"],
+                [str(executable), "pip", "list", "--format", "json", *target],
                 timeout=120.0,
             )
         except CommandFailedError as error:

@@ -23,7 +23,6 @@ from typing import Final
 from pypackhub.core.platform_guard import (
     EnvironmentKind,
     InterpreterFacts,
-    detect_kind,
     inspect,
 )
 
@@ -128,14 +127,21 @@ def _candidate_roots(roots: tuple[Path, ...] | None = None) -> tuple[Path, ...]:
     return tuple(seen)
 
 
-def _is_interesting_environment(path: Path) -> bool:
-    """True when a directory qualifies as an environment worth listing."""
-    return detect_kind(path) in {
-        EnvironmentKind.VENV,
-        EnvironmentKind.CONDA,
-        EnvironmentKind.PYBENV,
-        EnvironmentKind.SYSTEM,
-    }
+def _is_interesting_environment(facts: InterpreterFacts) -> bool:
+    """True when what was found on disk is an environment worth listing.
+
+    A virtual environment, a conda environment or a pyenv version is always
+    interesting. A plain directory is not: ``detect_kind`` answers ``SYSTEM`` for
+    anything without environment markers, so accepting that unconditionally made
+    every subdirectory of a scanned root look like an environment - which is
+    exactly what SPEC section 2 forbids ("never treat unrelated folders as
+    environments"). A system prefix therefore has to prove itself by containing
+    an interpreter.
+    """
+    if facts.kind is not EnvironmentKind.SYSTEM:
+        return True
+
+    return facts.executable is not None and not facts.is_alias_stub
 
 
 def detected_environments(
@@ -168,14 +174,16 @@ def detected_environments(
             if resolved in seen:
                 continue
 
-            if not _is_interesting_environment(resolved):
-                continue
-
             try:
                 facts = inspect(resolved)
             except OSError:
                 continue
 
+            if not _is_interesting_environment(facts):
+                continue
+
+            # A virtual environment whose interpreter is gone is broken, not
+            # usable: listing it would offer the user a target that cannot run.
             if facts.executable is None and facts.kind is not EnvironmentKind.SYSTEM:
                 continue
 

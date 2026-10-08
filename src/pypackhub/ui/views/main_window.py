@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, replace
+from enum import Enum
+from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QStatusBar,
     QToolButton,
@@ -47,15 +50,31 @@ from PySide6.QtWidgets import (
 from pypackhub import __version__
 from pypackhub.core.settings import AppSettings, ColorTheme, Language
 from pypackhub.ui.i18n.translations import TranslationKey
+from pypackhub.ui.services import UiContext
+from pypackhub.ui.theme.design_tokens import DesignTokens
 from pypackhub.ui.views import ViewName
+from pypackhub.ui.views.packages import PackagesView
 from pypackhub.ui.views.window_shell import WindowShell
+from pypackhub.ui.widgets.log_panel import LogPanel
+from pypackhub.ui.widgets.toast import ToastHost, ToastKind
 
 __all__ = [
     "NAVIGATION",
+    "EntryKind",
     "MainWindow",
     "NavigationEntry",
     "PlaceholderView",
 ]
+
+
+class EntryKind(str, Enum):
+    """What clicking a sidebar entry does."""
+
+    #: Swap the content stack to the entry's page.
+    PAGE = "page"
+    #: Reveal the bottom log panel, which is shared with every view rather than
+    #: copied into a page of its own.
+    LOG_PANEL = "log_panel"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +87,7 @@ class NavigationEntry:
     #: False until the phase that builds the view lands. The entry stays visible
     #: but disabled, so the user can see where the feature will live.
     available: bool = False
+    kind: EntryKind = EntryKind.PAGE
 
 
 #: The sidebar, in the order SPEC section 7 lists the destinations. Every entry
@@ -83,6 +103,7 @@ NAVIGATION: tuple[NavigationEntry, ...] = (
         ViewName.PACKAGES,
         TranslationKey.NAV_PACKAGES,
         TranslationKey.VIEW_PLACEHOLDER_PACKAGES,
+        available=True,
     ),
     NavigationEntry(
         ViewName.ENVIRONMENTS,
@@ -118,6 +139,8 @@ NAVIGATION: tuple[NavigationEntry, ...] = (
         ViewName.LOGS,
         TranslationKey.NAV_LOGS,
         TranslationKey.VIEW_PLACEHOLDER_LOGS,
+        available=True,
+        kind=EntryKind.LOG_PANEL,
     ),
     NavigationEntry(
         ViewName.SETTINGS,
@@ -171,12 +194,20 @@ class PlaceholderView(QWidget):
 class MainWindow(QMainWindow):
     """The application window."""
 
-    def __init__(self, *, shell: WindowShell | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        shell: WindowShell | None = None,
+        context: UiContext | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._shell = shell or WindowShell()
+        self._context = context or UiContext()
         self._views: dict[ViewName, QWidget] = {}
         self._nav_buttons: dict[ViewName, QPushButton] = {}
         self._current_view = ViewName.DASHBOARD
+        self._environments_loaded = False
 
         self.setObjectName("mainWindow")
         self.setMinimumSize(960, 600)
@@ -184,6 +215,8 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menus()
+        self._install_views()
+        self._toasts = ToastHost(self)
         self.retranslate()
         self._restore_window_state()
 
@@ -206,12 +239,28 @@ class MainWindow(QMainWindow):
         """The sidebar button for a destination."""
         return self._nav_buttons[name]
 
+    @property
+    def context(self) -> UiContext:
+        return self._context
+
+    @property
+    def packages_view(self) -> PackagesView:
+        """The packages view, which the window owns and every phase keeps using."""
+        return self._packages
+
+    @property
+    def log_panel(self) -> LogPanel:
+        return self._log_panel
+
+    @property
+    def toasts(self) -> ToastHost:
+        return self._toasts
+
     def register_view(self, name: ViewName, view: QWidget) -> None:
         """Plug a real view into the shell, replacing its placeholder page.
 
-        Section 4 and later phases call this. The navigation entry switches to
-        enabled and the stack shows the widget; nothing else in the window has to
-        change.
+        Later phases call this. The navigation entry switches to enabled and the
+        stack shows the widget; nothing else in the window has to change.
         """
         self._views[name] = view
         self._stack.addWidget(view)
@@ -219,6 +268,27 @@ class MainWindow(QMainWindow):
         if button is not None:
             button.setEnabled(True)
             button.setToolTip("")
+
+    def _install_views(self) -> None:
+        """Create the views section 4 delivers and wire them to the shell."""
+        self._packages = PackagesView(
+            context=self._context,
+            # ``shell`` is PyPackHub's own window-shell object, not a command shell;
+            # bandit flags the keyword name (B604, low confidence) the same way it
+            # does at the launch site in ui/app.py.
+            shell=self._shell,  # nosec B604
+            log_panel=self._log_panel,
+            parent=self,
+        )
+        self.register_view(ViewName.PACKAGES, self._packages)
+
+        # Everything the packages view reports lands in the window: the status
+        # bar for progress, the toast host for outcomes, and the log panel (which
+        # the view writes to directly).
+        self._packages.status_changed.connect(self._on_status_changed)
+        self._packages.toast.connect(self._show_toast)
+        self._log_panel.cancel_requested.connect(self._packages.cancel_running)
+        self._search_input.textChanged.connect(self._on_search_changed)
 
     def show_view(self, name: ViewName) -> None:
         """Switch to a destination.
@@ -229,6 +299,13 @@ class MainWindow(QMainWindow):
         """
         button = self._nav_buttons.get(name)
         if button is not None and not button.isEnabled():
+            return
+
+        entry = _entry_for(name)
+        if entry is not None and entry.kind is EntryKind.LOG_PANEL:
+            # The log panel is shared with every view rather than copied into a
+            # page of its own, so "Logs" reveals it instead of switching pages.
+            self.set_log_panel_visible(True)
             return
 
         page = self._views.get(name)
@@ -261,10 +338,22 @@ class MainWindow(QMainWindow):
 
         self._stack = QStackedWidget(body)
         for entry in NAVIGATION:
-            self._stack.addWidget(self._placeholder_for(entry.name))
+            if entry.kind is EntryKind.PAGE:
+                self._stack.addWidget(self._placeholder_for(entry.name))
         body_layout.addWidget(self._stack, 1)
 
-        root_layout.addWidget(body, 1)
+        # The log panel is shared: one instance, docked under the content, used by
+        # every view that changes something.
+        self._log_panel = LogPanel(translator=self._shell.translator, parent=root)
+        self._log_panel.setVisible(False)
+
+        self._content_splitter = QSplitter(Qt.Orientation.Vertical, root)
+        self._content_splitter.addWidget(body)
+        self._content_splitter.addWidget(self._log_panel)
+        self._content_splitter.setStretchFactor(0, 4)
+        self._content_splitter.setStretchFactor(1, 1)
+        root_layout.addWidget(self._content_splitter, 1)
+
         self.setCentralWidget(root)
 
         self.setStatusBar(QStatusBar(self))
@@ -332,9 +421,10 @@ class MainWindow(QMainWindow):
         self._environment_switcher = QComboBox(bar)
         self._environment_switcher.setObjectName("environmentSwitcher")
         self._environment_switcher.setMinimumWidth(240)
-        # Section 2's discovery results are wired in when the package view lands;
-        # until then the switcher states the truth: nothing has been scanned.
+        # The entries are filled in on the first show: environment discovery
+        # touches the filesystem, and the window must be on screen before that.
         self._environment_switcher.addItem("")
+        self._environment_switcher.currentIndexChanged.connect(self._on_environment_changed)
         layout.addWidget(self._environment_switcher)
 
         layout.addStretch(1)
@@ -379,6 +469,11 @@ class MainWindow(QMainWindow):
         self._sidebar_action.triggered.connect(self.toggle_sidebar)
         view_menu.addAction(self._sidebar_action)
 
+        self._log_action = QAction(self)
+        self._log_action.setShortcut(QKeySequence("Ctrl+J"))
+        self._log_action.triggered.connect(self.toggle_log_panel)
+        view_menu.addAction(self._log_action)
+
         self._view_menu = view_menu
 
     def _placeholder_for(self, name: ViewName) -> QWidget:
@@ -408,13 +503,93 @@ class MainWindow(QMainWindow):
         self.retranslate()
         self._shell.save()
 
+    def toggle_log_panel(self) -> None:
+        self.set_log_panel_visible(not self._log_panel.isVisible())
+
+    def set_log_panel_visible(self, visible: bool) -> None:
+        """Show or hide the shared bottom log panel."""
+        self._log_panel.setVisible(visible)
+        button = self._nav_buttons.get(ViewName.LOGS)
+        if button is not None:
+            button.setChecked(visible)
+
+    # -- environment -----------------------------------------------------------
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt override
+        """Load the environment list once, after the window is on screen."""
+        super().showEvent(event)
+        if not self._environments_loaded:
+            self._environments_loaded = True
+            QTimer.singleShot(0, self.load_environments)
+
+    def load_environments(self) -> None:
+        """Fill the switcher with the environments discovery found.
+
+        Discovery walks a few well-known directories, so it is cheap, but it is
+        still filesystem work: it runs after the first paint rather than during
+        it, and the switcher shows the current interpreter until it lands.
+        """
+        environments = self._context.environments()
+        self._environment_switcher.blockSignals(True)
+        self._environment_switcher.clear()
+        for prefix in environments:
+            self._environment_switcher.addItem(str(prefix), str(prefix))
+        self._environment_switcher.blockSignals(False)
+
+        if self._environment_switcher.count() == 0:
+            self._environment_switcher.addItem(
+                self._shell.text(TranslationKey.TOPBAR_NO_ENVIRONMENT), ""
+            )
+            return
+
+        current = self._context.default_environment
+        index = next(
+            (
+                position
+                for position in range(self._environment_switcher.count())
+                if self._environment_switcher.itemData(position) == str(current)
+            ),
+            0,
+        )
+        self._environment_switcher.setCurrentIndex(index)
+        self._on_environment_changed(index)
+
+    def _on_environment_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        value = self._environment_switcher.itemData(index)
+        if not value:
+            return
+        self._packages.set_environment(Path(str(value)))
+
+    # -- application signals ---------------------------------------------------
+
+    def _on_search_changed(self, text: str) -> None:
+        """The top bar's search filters the packages table."""
+        self._packages.search_edit.setText(text)
+        if text.strip() and self._current_view is not ViewName.PACKAGES:
+            self.show_view(ViewName.PACKAGES)
+
+    def _on_status_changed(self, text: str) -> None:
+        self.statusBar().showMessage(text)
+
+    def _show_toast(self, text: str, kind: object) -> None:
+        toast_kind = kind if isinstance(kind, ToastKind) else ToastKind.INFO
+        self._toasts.show_message(text, toast_kind)
+
     # -- rendering -------------------------------------------------------------
 
     def apply_theme(self) -> None:
         """Push the active theme at the whole application, live."""
         application = QApplication.instance()
         target = application if application is not None else self
-        self._shell.apply_to(target)
+        theme = self._shell.apply_to(target)
+        self._adopt_tokens(theme.tokens)
+
+    def _adopt_tokens(self, tokens: DesignTokens) -> None:
+        """Let the painted widgets re-colour themselves after a theme switch."""
+        self._packages.apply_theme(tokens)
+        self._toasts.apply_tokens(tokens)
 
     def retranslate(self) -> None:
         """Re-render every string in the current language."""
@@ -439,6 +614,7 @@ class MainWindow(QMainWindow):
         self._theme_action.setText(shell.text(TranslationKey.SETTINGS_THEME))
         self._language_action.setText(shell.text(TranslationKey.SETTINGS_LANGUAGE))
         self._sidebar_action.setText(shell.text(TranslationKey.MENU_VIEW_SIDEBAR))
+        self._log_action.setText(shell.text(TranslationKey.NAV_LOGS))
         self._environment_label.setText(shell.text(TranslationKey.TOPBAR_ENVIRONMENT))
         self._search_input.setPlaceholderText(shell.text(TranslationKey.TOPBAR_SEARCH_PLACEHOLDER))
         self._environment_switcher.setItemText(0, shell.text(TranslationKey.TOPBAR_NO_ENVIRONMENT))
@@ -447,6 +623,8 @@ class MainWindow(QMainWindow):
             "EN" if shell.translator.resolved_language is Language.EN else "\u0641\u0627"
         )
         self._language_button.setToolTip(shell.text(TranslationKey.TOPBAR_TOGGLE_LANGUAGE))
+        self._packages.retranslate()
+        self._log_panel.retranslate(shell.translator)
         self.statusBar().showMessage(shell.text(TranslationKey.APP_VERSION, version=__version__))
 
     def _theme_label(self) -> str:
@@ -498,3 +676,11 @@ def _decode(value: str) -> QByteArray | None:
 def _with_window_state(settings: AppSettings, *, geometry: str, state: str) -> AppSettings:
     """Return a copy of *settings* with the window geometry replaced."""
     return replace(settings, main_window_geometry=geometry, main_window_state=state)
+
+
+def _entry_for(name: ViewName) -> NavigationEntry | None:
+    """The navigation entry for a destination, if it has one."""
+    for entry in NAVIGATION:
+        if entry.name is name:
+            return entry
+    return None

@@ -27,10 +27,17 @@ from PySide6.QtWidgets import QApplication
 
 from pypackhub import APP_DISPLAY_NAME, APP_ID, __version__
 from pypackhub.core.settings import settings_data_directory
+from pypackhub.ui.services import DefaultInventoryProvider, UiContext
 from pypackhub.ui.views.main_window import MainWindow
 from pypackhub.ui.views.window_shell import QSettingsStore, WindowShell
 
-__all__ = ["build_application", "build_window", "register_bundled_fonts", "run"]
+__all__ = [
+    "build_application",
+    "build_context",
+    "build_window",
+    "register_bundled_fonts",
+    "run",
+]
 
 #: Bundled font families, in the order they are registered.
 FONT_DIRECTORIES: tuple[str, ...] = ("inter", "vazirmatn", "jetbrains-mono")
@@ -70,14 +77,26 @@ def build_application(argv: list[str] | None = None) -> QApplication:
     return application
 
 
-def build_window(*, store: QSettingsStore | None = None) -> MainWindow:
+def build_context(*, prefer_uv: bool = True) -> UiContext:
+    """Build the services the views run against.
+
+    ``prefer_uv`` follows SPEC section 2: when uv is installed, it is the backend
+    for an environment, because it is dramatically faster, and every action still
+    goes through the same hardened runner either way.
+    """
+    return UiContext(provider=DefaultInventoryProvider(prefer_uv=prefer_uv))
+
+
+def build_window(
+    *, store: QSettingsStore | None = None, context: UiContext | None = None
+) -> MainWindow:
     """Build the main window with the persisted settings already applied."""
     shell = WindowShell(store=store or QSettingsStore())
     shell.load()
 
     # ``shell=`` is PyPackHub's own window-shell object, not a command shell; this
     # is a bandit false positive on the keyword's name (B604, low confidence).
-    window = MainWindow(shell=shell)  # nosec B604
+    window = MainWindow(shell=shell, context=context or build_context())  # nosec B604
     window.apply_theme()
     return window
 

@@ -99,6 +99,57 @@ class TranslationKey(str, Enum):
 
     PACKAGES_TITLE = "packages.title"
     PACKAGES_SEARCH = "packages.search"
+    PACKAGES_SUMMARY = "packages.summary"
+    PACKAGES_SHOW_SIZES = "packages.show_sizes"
+    PACKAGES_ONLY_OUTDATED = "packages.only_outdated"
+    PACKAGES_SELECTED = "packages.selected"
+    PACKAGES_COUNT = "packages.count"
+    PACKAGES_OUTDATED_TOTAL = "packages.outdated_total"
+    PACKAGES_TOTAL_SIZE = "packages.total_size"
+    PACKAGES_INSTALL_SPEC = "packages.install_spec"
+    PACKAGES_INSTALL_VERSION = "packages.install_version"
+    PACKAGES_INSTALL_USER = "packages.install_user"
+    PACKAGES_DOWNGRADE = "packages.downgrade"
+    PACKAGES_NO_SELECTION = "packages.no_selection"
+    PACKAGES_REFRESHING = "packages.refreshing"
+    PACKAGES_CHECKING = "packages.checking"
+    PACKAGES_MEASURING = "packages.measuring"
+    PACKAGES_CANCELLED = "packages.cancelled"
+    PACKAGES_EMPTY = "packages.empty"
+    PACKAGES_EMPTY_FILTER = "packages.empty_filter"
+
+    DETAIL_TITLE = "detail.title"
+    DETAIL_NO_SELECTION = "detail.no_selection"
+    DETAIL_SUMMARY = "detail.summary"
+    DETAIL_LICENSE = "detail.license"
+    DETAIL_AUTHOR = "detail.author"
+    DETAIL_LOCATION = "detail.location"
+    DETAIL_REQUIRES = "detail.requires"
+    DETAIL_REQUIRED_BY = "detail.required_by"
+    DETAIL_LINKS = "detail.links"
+    DETAIL_HOME_PAGE = "detail.home_page"
+    DETAIL_PROJECT_URL = "detail.project_url"
+    DETAIL_PYTHON = "detail.python"
+    DETAIL_EDITABLE = "detail.editable"
+    DETAIL_DIRECT_REFERENCE = "detail.direct_reference"
+    DETAIL_NONE = "detail.none"
+    DETAIL_MORE = "detail.more"
+
+    INSTALL_TITLE = "install.title"
+    DOWNGRADE_TITLE = "downgrade.title"
+    DOWNGRADE_CURRENT = "downgrade.current"
+    DOWNGRADE_VERSION = "downgrade.version"
+
+    CONFIRM_COMMAND = "confirm.command"
+    CONFIRM_ENVIRONMENT = "confirm.environment"
+    CONFIRM_AFFECTED = "confirm.affected"
+    CONFIRM_WARNING = "confirm.warning"
+
+    BLOCKED_TITLE = "blocked.title"
+    BLOCKED_SUGGESTION = "blocked.suggestion"
+    ENV_NO_MANAGER = "env.no_manager"
+    ENV_CURRENT = "env.current"
+
     PACKAGES_INSTALL = "packages.install"
     PACKAGES_UNINSTALL = "packages.uninstall"
     PACKAGES_UPGRADE = "packages.upgrade"
@@ -135,6 +186,12 @@ class TranslationKey(str, Enum):
     LOG_TITLE = "log.title"
     LOG_CLEAR = "log.clear"
     LOG_SAVE = "log.save"
+    LOG_CANCEL = "log.cancel"
+    LOG_RUNNING = "log.running"
+    LOG_DONE = "log.done"
+    LOG_FAILED = "log.failed"
+    LOG_CANCELLED = "log.cancelled"
+    LOG_EMPTY = "log.empty"
 
     TOAST_INSTALLED = "toast.installed"
     TOAST_UNINSTALLED = "toast.uninstalled"
@@ -229,6 +286,58 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_CANCEL: "Cancel",
     TranslationKey.PACKAGES_TITLE: "Packages",
     TranslationKey.PACKAGES_SEARCH: "Search packages...",
+    TranslationKey.PACKAGES_SUMMARY: "Summary",
+    TranslationKey.PACKAGES_SHOW_SIZES: "Show sizes",
+    TranslationKey.PACKAGES_ONLY_OUTDATED: "Outdated only",
+    TranslationKey.PACKAGES_SELECTED: "%(count)s selected",
+    TranslationKey.PACKAGES_COUNT: "%(count)s packages",
+    TranslationKey.PACKAGES_OUTDATED_TOTAL: "%(count)s outdated",
+    TranslationKey.PACKAGES_TOTAL_SIZE: "Total size: %(size)s",
+    TranslationKey.PACKAGES_INSTALL_SPEC: "Package name or specifier",
+    TranslationKey.PACKAGES_INSTALL_VERSION: "Version (optional)",
+    TranslationKey.PACKAGES_INSTALL_USER: "Install into the user site directory",
+    TranslationKey.PACKAGES_DOWNGRADE: "Downgrade to a version",
+    TranslationKey.PACKAGES_NO_SELECTION: "Select a package first",
+    TranslationKey.PACKAGES_REFRESHING: "Refreshing the package list...",
+    TranslationKey.PACKAGES_CHECKING: (
+        "Checking %(name)s on the package index (%(index)s of %(total)s)"
+    ),
+    TranslationKey.PACKAGES_MEASURING: "Measuring package sizes...",
+    TranslationKey.PACKAGES_CANCELLED: "The running task was cancelled.",
+    TranslationKey.PACKAGES_EMPTY: "No packages are installed in this environment.",
+    TranslationKey.PACKAGES_EMPTY_FILTER: "No package matches the current filter.",
+    TranslationKey.DETAIL_TITLE: "Package details",
+    TranslationKey.DETAIL_NO_SELECTION: "Select a package to see its details.",
+    TranslationKey.DETAIL_SUMMARY: "Description",
+    TranslationKey.DETAIL_LICENSE: "License",
+    TranslationKey.DETAIL_AUTHOR: "Author",
+    TranslationKey.DETAIL_LOCATION: "Location",
+    TranslationKey.DETAIL_REQUIRES: "Requires",
+    TranslationKey.DETAIL_REQUIRED_BY: "Required by",
+    TranslationKey.DETAIL_LINKS: "Links",
+    TranslationKey.DETAIL_HOME_PAGE: "Home page",
+    TranslationKey.DETAIL_PROJECT_URL: "Project URL",
+    TranslationKey.DETAIL_PYTHON: "Requires Python",
+    TranslationKey.DETAIL_EDITABLE: "Installed in editable mode",
+    TranslationKey.DETAIL_DIRECT_REFERENCE: "Installed from a direct reference",
+    TranslationKey.DETAIL_NONE: "None",
+    TranslationKey.DETAIL_MORE: "+%(count)s more",
+    TranslationKey.INSTALL_TITLE: "Install a package",
+    TranslationKey.DOWNGRADE_TITLE: "Downgrade %(package)s",
+    TranslationKey.DOWNGRADE_CURRENT: "Installed version: %(version)s",
+    TranslationKey.DOWNGRADE_VERSION: "Version to install",
+    TranslationKey.CONFIRM_COMMAND: "Command",
+    TranslationKey.CONFIRM_ENVIRONMENT: "Environment",
+    TranslationKey.CONFIRM_AFFECTED: "Affected packages",
+    TranslationKey.CONFIRM_WARNING: (
+        "This changes %(environment)s. PyPackHub runs exactly the command above, nothing else."
+    ),
+    TranslationKey.BLOCKED_TITLE: "This environment cannot be modified",
+    TranslationKey.BLOCKED_SUGGESTION: "Suggestion",
+    TranslationKey.ENV_NO_MANAGER: (
+        "No package manager was found. Install pip or uv, then refresh."
+    ),
+    TranslationKey.ENV_CURRENT: "(current interpreter)",
     TranslationKey.PACKAGES_INSTALL: "Install",
     TranslationKey.PACKAGES_UNINSTALL: "Uninstall",
     TranslationKey.PACKAGES_UPGRADE: "Upgrade",
@@ -261,6 +370,12 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.LOG_TITLE: "Log",
     TranslationKey.LOG_CLEAR: "Clear",
     TranslationKey.LOG_SAVE: "Save",
+    TranslationKey.LOG_CANCEL: "Cancel the running task",
+    TranslationKey.LOG_RUNNING: "Running...",
+    TranslationKey.LOG_DONE: "Finished successfully.",
+    TranslationKey.LOG_FAILED: "Failed: %(error)s",
+    TranslationKey.LOG_CANCELLED: "Cancelled.",
+    TranslationKey.LOG_EMPTY: "Nothing has run yet.",
     TranslationKey.TOAST_INSTALLED: "Installed %(package)s",
     TranslationKey.TOAST_UNINSTALLED: "Uninstalled %(package)s",
     TranslationKey.TOAST_UPGRADED: "Upgraded %(package)s",
@@ -352,6 +467,56 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_CANCEL: "لغو",
     TranslationKey.PACKAGES_TITLE: "بسته‌ها",
     TranslationKey.PACKAGES_SEARCH: "جست‌وجوی بسته‌ها...",
+    TranslationKey.PACKAGES_SUMMARY: "توضیح",
+    TranslationKey.PACKAGES_SHOW_SIZES: "نمایش اندازه‌ها",
+    TranslationKey.PACKAGES_ONLY_OUTDATED: "فقط قدیمی‌ها",
+    TranslationKey.PACKAGES_SELECTED: "%(count)s مورد انتخاب شده",
+    TranslationKey.PACKAGES_COUNT: "%(count)s بسته",
+    TranslationKey.PACKAGES_OUTDATED_TOTAL: "%(count)s بستهٔ قدیمی",
+    TranslationKey.PACKAGES_TOTAL_SIZE: "اندازهٔ کل: %(size)s",
+    TranslationKey.PACKAGES_INSTALL_SPEC: "نام یا مشخصهٔ بسته",
+    TranslationKey.PACKAGES_INSTALL_VERSION: "نسخه (اختیاری)",
+    TranslationKey.PACKAGES_INSTALL_USER: "نصب در شاخهٔ کاربر",
+    TranslationKey.PACKAGES_DOWNGRADE: "نصب نسخهٔ قدیمی‌تر",
+    TranslationKey.PACKAGES_NO_SELECTION: "ابتدا یک بسته را انتخاب کنید",
+    TranslationKey.PACKAGES_REFRESHING: "به‌روزرسانی فهرست بسته‌ها...",
+    TranslationKey.PACKAGES_CHECKING: ("بررسی %(name)s در نمایهٔ بسته‌ها (%(index)s از %(total)s)"),
+    TranslationKey.PACKAGES_MEASURING: "اندازه‌گیری اندازهٔ بسته‌ها...",
+    TranslationKey.PACKAGES_CANCELLED: "کار در حال اجرا لغو شد.",
+    TranslationKey.PACKAGES_EMPTY: "هیچ بسته‌ای در این محیط نصب نیست.",
+    TranslationKey.PACKAGES_EMPTY_FILTER: "هیچ بسته‌ای با پالایهٔ فعلی هم‌خوانی ندارد.",
+    TranslationKey.DETAIL_TITLE: "جزئیات بسته",
+    TranslationKey.DETAIL_NO_SELECTION: "برای دیدن جزئیات، یک بسته را انتخاب کنید.",
+    TranslationKey.DETAIL_SUMMARY: "توضیح",
+    TranslationKey.DETAIL_LICENSE: "پروانه",
+    TranslationKey.DETAIL_AUTHOR: "نویسنده",
+    TranslationKey.DETAIL_LOCATION: "محل نصب",
+    TranslationKey.DETAIL_REQUIRES: "نیازمندها",
+    TranslationKey.DETAIL_REQUIRED_BY: "نیازمند توسط",
+    TranslationKey.DETAIL_LINKS: "پیوندها",
+    TranslationKey.DETAIL_HOME_PAGE: "صفحهٔ اصلی",
+    TranslationKey.DETAIL_PROJECT_URL: "نشانی پروژه",
+    TranslationKey.DETAIL_PYTHON: "نسخهٔ پایتون موردنیاز",
+    TranslationKey.DETAIL_EDITABLE: "به‌صورت ویرایش‌پذیر نصب شده است",
+    TranslationKey.DETAIL_DIRECT_REFERENCE: "از یک ارجاع مستقیم نصب شده است",
+    TranslationKey.DETAIL_NONE: "هیچ",
+    TranslationKey.DETAIL_MORE: "%(count)s مورد دیگر",
+    TranslationKey.INSTALL_TITLE: "نصب یک بسته",
+    TranslationKey.DOWNGRADE_TITLE: "نصب نسخهٔ قدیمی‌تر %(package)s",
+    TranslationKey.DOWNGRADE_CURRENT: "نسخهٔ نصب‌شده: %(version)s",
+    TranslationKey.DOWNGRADE_VERSION: "نسخهٔ موردنظر برای نصب",
+    TranslationKey.CONFIRM_COMMAND: "دستور",
+    TranslationKey.CONFIRM_ENVIRONMENT: "محیط",
+    TranslationKey.CONFIRM_AFFECTED: "بسته‌های اثرپذیر",
+    TranslationKey.CONFIRM_WARNING: (
+        "این کار %(environment)s را تغییر می‌دهد. پای‌پک‌هاب دقیقاً همان دستور بالا را اجرا می‌کند و بس."
+    ),
+    TranslationKey.BLOCKED_TITLE: "این محیط قابل تغییر نیست",
+    TranslationKey.BLOCKED_SUGGESTION: "پیشنهاد",
+    TranslationKey.ENV_NO_MANAGER: (
+        "هیچ مدیر بسته‌ای پیدا نشد. pip یا uv را نصب کنید و سپس به‌روزرسانی را بزنید."
+    ),
+    TranslationKey.ENV_CURRENT: "(مفسر کنونی)",
     TranslationKey.PACKAGES_INSTALL: "نصب",
     TranslationKey.PACKAGES_UNINSTALL: "حذف",
     TranslationKey.PACKAGES_UPGRADE: "به‌روزرسانی",
@@ -386,6 +551,12 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.LOG_TITLE: "گزارش",
     TranslationKey.LOG_CLEAR: "پاک‌کردن",
     TranslationKey.LOG_SAVE: "ذخیره",
+    TranslationKey.LOG_CANCEL: "لغو کار در حال اجرا",
+    TranslationKey.LOG_RUNNING: "در حال اجرا...",
+    TranslationKey.LOG_DONE: "با موفقیت پایان یافت.",
+    TranslationKey.LOG_FAILED: "ناموفق: %(error)s",
+    TranslationKey.LOG_CANCELLED: "لغو شد.",
+    TranslationKey.LOG_EMPTY: "هنوز چیزی اجرا نشده است.",
     TranslationKey.TOAST_INSTALLED: "%(package)s نصب شد",
     TranslationKey.TOAST_UNINSTALLED: "%(package)s حذف شد",
     TranslationKey.TOAST_UPGRADED: "%(package)s به‌روز شد",

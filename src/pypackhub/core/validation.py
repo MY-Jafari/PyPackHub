@@ -128,6 +128,8 @@ class Reason(str, Enum):
     SHELL_METACHARACTER = "shell_metacharacter"
     INVALID_NAME = "invalid_name"
     INVALID_SPECIFIER = "invalid_specifier"
+    INVALID_VERSION = "invalid_version"
+    UNSUPPORTED = "unsupported"
     DIRECT_REFERENCE_NOT_ALLOWED = "direct_reference_not_allowed"
     MARKER_NOT_ALLOWED = "marker_not_allowed"
     INSECURE_SCHEME = "insecure_scheme"
