@@ -123,6 +123,38 @@ class TranslationKey(str, Enum):
     CREATE_ENV_CANCELLED = "create_env.cancelled"
     BLOCKED_CREATE_ENVIRONMENT = "blocked.create_environment"
 
+    DEPS_TITLE = "deps.title"
+    DEPS_SUMMARY = "deps.summary"
+    DEPS_SEARCH = "deps.search"
+    DEPS_SELECT_PROMPT = "deps.select_prompt"
+    DEPS_REFRESH = "deps.refresh"
+    DEPS_WHY = "deps.why"
+    DEPS_WHY_ORPHAN = "deps.why_orphan"
+    DEPS_WHY_REQUESTED = "deps.why_requested"
+    DEPS_REQUIRES = "deps.requires"
+    DEPS_REQUIRED_BY = "deps.required_by"
+    DEPS_NONE = "deps.none"
+    DEPS_MISSING = "deps.missing"
+    DEPS_MISSING_NOTE = "deps.missing_note"
+    DEPS_UNKNOWN = "deps.unknown"
+    DEPS_ORPHANS = "deps.orphans"
+    DEPS_ORPHANS_NOTE = "deps.orphans_note"
+    DEPS_ORPHANS_NONE = "deps.orphans_none"
+    DEPS_ORPHANS_REQUESTED_ONLY = "deps.orphans_requested_only"
+    DEPS_ORPHANS_SIZE = "deps.orphans_size"
+    DEPS_ORPHANS_PARTIAL = "deps.orphans_partial"
+    DEPS_CLEAN_UP = "deps.clean_up"
+    DEPS_SCANNING = "deps.scanning"
+    DEPS_SCANNED = "deps.scanned"
+    DEPS_FAILED = "deps.failed"
+
+    REMOVAL_PREVIEW_TITLE = "removal_preview.title"
+    REMOVAL_PREVIEW_WOULD_REMOVE = "removal_preview.would_remove"
+    REMOVAL_PREVIEW_LEAVE_UNUSED = "removal_preview.leave_unused"
+    REMOVAL_PREVIEW_BLOCKED = "removal_preview.blocked"
+    REMOVAL_PREVIEW_BREAKS = "removal_preview.breaks"
+    REMOVAL_PREVIEW_CONTINUE = "removal_preview.continue"
+
     PACKAGES_TITLE = "packages.title"
     PACKAGES_SEARCH = "packages.search"
     PACKAGES_SUMMARY = "packages.summary"
@@ -341,6 +373,50 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.CREATE_ENV_FAILED: "Could not create the environment: %(error)s",
     TranslationKey.CREATE_ENV_CANCELLED: "Environment creation cancelled",
     TranslationKey.BLOCKED_CREATE_ENVIRONMENT: "Create a virtual environment",
+    TranslationKey.DEPS_TITLE: "Dependencies",
+    TranslationKey.DEPS_SUMMARY: "%(packages)s packages, %(orphans)s unneeded",
+    TranslationKey.DEPS_SEARCH: "Filter packages...",
+    TranslationKey.DEPS_SELECT_PROMPT: "Select a package to see what it needs and what needs it.",
+    TranslationKey.DEPS_REFRESH: "Rescan",
+    TranslationKey.DEPS_WHY: "Why is this installed?",
+    TranslationKey.DEPS_WHY_REQUESTED: "You asked for this package by name.",
+    TranslationKey.DEPS_WHY_ORPHAN: (
+        "Nothing installed requires this package, and it was not installed by "
+        "name, so it was pulled in for something that has since gone."
+    ),
+    TranslationKey.DEPS_REQUIRES: "Requires",
+    TranslationKey.DEPS_REQUIRED_BY: "Required by",
+    TranslationKey.DEPS_NONE: "Nothing",
+    TranslationKey.DEPS_MISSING: "Missing requirements",
+    TranslationKey.DEPS_MISSING_NOTE: ("Declared by this package but not installed here."),
+    TranslationKey.DEPS_UNKNOWN: "no metadata",
+    TranslationKey.DEPS_ORPHANS: "Unneeded packages",
+    TranslationKey.DEPS_ORPHANS_NOTE: (
+        "Nothing installed requires these, and you did not ask for them by name."
+    ),
+    TranslationKey.DEPS_ORPHANS_NONE: "Nothing is unneeded.",
+    TranslationKey.DEPS_ORPHANS_REQUESTED_ONLY: (
+        "%(count)s installed packages are required by nothing but you asked for them."
+    ),
+    TranslationKey.DEPS_ORPHANS_SIZE: "Reclaims %(size)s across %(count)s measured packages.",
+    TranslationKey.DEPS_ORPHANS_PARTIAL: "sizes not measured",
+    TranslationKey.DEPS_CLEAN_UP: "Preview removal",
+    TranslationKey.DEPS_SCANNING: "Reading installed metadata...",
+    TranslationKey.DEPS_SCANNED: "Read the metadata of %(count)s packages.",
+    TranslationKey.DEPS_FAILED: "Could not read the environment: %(error)s",
+    TranslationKey.REMOVAL_PREVIEW_TITLE: "Preview: what this removal would do",
+    TranslationKey.REMOVAL_PREVIEW_WOULD_REMOVE: "Would remove %(count)s packages",
+    TranslationKey.REMOVAL_PREVIEW_LEAVE_UNUSED: (
+        "Left installed but unused afterwards: %(packages)s"
+    ),
+    TranslationKey.REMOVAL_PREVIEW_BLOCKED: (
+        "Still required by something that is staying, so this removal would fail "
+        "or be refused: %(packages)s"
+    ),
+    TranslationKey.REMOVAL_PREVIEW_BREAKS: (
+        "Would be left with a missing requirement: %(packages)s"
+    ),
+    TranslationKey.REMOVAL_PREVIEW_CONTINUE: "Continue",
     TranslationKey.PACKAGES_TITLE: "Packages",
     TranslationKey.PACKAGES_SEARCH: "Search packages...",
     TranslationKey.PACKAGES_SUMMARY: "Summary",
@@ -552,6 +628,47 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.CREATE_ENV_FAILED: "ساخت محیط ناموفق بود: %(error)s",
     TranslationKey.CREATE_ENV_CANCELLED: "ساخت محیط لغو شد",
     TranslationKey.BLOCKED_CREATE_ENVIRONMENT: "ساخت محیط مجازی",
+    TranslationKey.DEPS_TITLE: "وابستگی‌ها",
+    TranslationKey.DEPS_SUMMARY: "%(packages)s بسته، %(orphans)s بدون نیاز",
+    TranslationKey.DEPS_SEARCH: "پالایش بسته‌ها...",
+    TranslationKey.DEPS_SELECT_PROMPT: "یک بسته را انتخاب کنید تا نیازهایش و نیازمندانش را ببینید.",
+    TranslationKey.DEPS_REFRESH: "اسکن دوباره",
+    TranslationKey.DEPS_WHY: "چرا این بسته نصب است؟",
+    TranslationKey.DEPS_WHY_REQUESTED: "شما این بسته را با نام درخواست کرده‌اید.",
+    TranslationKey.DEPS_WHY_ORPHAN: (
+        "هیچ بستهٔ نصب‌شده‌ای به این نیاز ندارد و با نام هم نصب نشده است، پس "
+        "برای چیزی نصب شده که دیگر وجود ندارد."
+    ),
+    TranslationKey.DEPS_REQUIRES: "نیازها",
+    TranslationKey.DEPS_REQUIRED_BY: "نیازمندها",
+    TranslationKey.DEPS_NONE: "هیچ",
+    TranslationKey.DEPS_MISSING: "نیازهای نصب‌نشده",
+    TranslationKey.DEPS_MISSING_NOTE: "توسط این بسته اعلام شده اما در این محیط نصب نیست.",
+    TranslationKey.DEPS_UNKNOWN: "بدون فراداده",
+    TranslationKey.DEPS_ORPHANS: "بسته‌های بدون نیاز",
+    TranslationKey.DEPS_ORPHANS_NOTE: (
+        "هیچ بستهٔ نصب‌شده‌ای به این‌ها نیاز ندارد و شما هم با نام درخواستشان نکرده‌اید."
+    ),
+    TranslationKey.DEPS_ORPHANS_NONE: "هیچ بسته‌ای بی‌نیاز نیست.",
+    TranslationKey.DEPS_ORPHANS_REQUESTED_ONLY: (
+        "%(count)s بستهٔ نصب‌شده مورد نیاز چیزی نیست اما شما درخواستشان کرده‌اید."
+    ),
+    TranslationKey.DEPS_ORPHANS_SIZE: "%(size)s در %(count)s بستهٔ اندازه‌گیری‌شده آزاد می‌شود.",
+    TranslationKey.DEPS_ORPHANS_PARTIAL: "اندازه‌ها اندازه‌گیری نشده",
+    TranslationKey.DEPS_CLEAN_UP: "پیش‌نمایش حذف",
+    TranslationKey.DEPS_SCANNING: "خواندن فرادادهٔ نصب‌شده‌ها...",
+    TranslationKey.DEPS_SCANNED: "فرادادهٔ %(count)s بسته خوانده شد.",
+    TranslationKey.DEPS_FAILED: "خواندن محیط ناموفق بود: %(error)s",
+    TranslationKey.REMOVAL_PREVIEW_TITLE: "پیش‌نمایش: این حذف چه می‌کند",
+    TranslationKey.REMOVAL_PREVIEW_WOULD_REMOVE: "%(count)s بسته حذف می‌شود",
+    TranslationKey.REMOVAL_PREVIEW_LEAVE_UNUSED: (
+        "پس از آن نصب می‌ماند اما بی‌استفاده: %(packages)s"
+    ),
+    TranslationKey.REMOVAL_PREVIEW_BLOCKED: (
+        "هنوز مورد نیاز چیزی است که می‌ماند، پس این حذف ناموفق یا رد می‌شود: %(packages)s"
+    ),
+    TranslationKey.REMOVAL_PREVIEW_BREAKS: "با نیاز نصب‌نشده رها می‌شود: %(packages)s",
+    TranslationKey.REMOVAL_PREVIEW_CONTINUE: "ادامه",
     TranslationKey.PACKAGES_TITLE: "بسته‌ها",
     TranslationKey.PACKAGES_SEARCH: "جست‌وجوی بسته‌ها...",
     TranslationKey.PACKAGES_SUMMARY: "توضیح",

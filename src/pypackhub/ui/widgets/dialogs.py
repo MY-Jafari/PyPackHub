@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from pypackhub.core.backends.base import ActionKind, CommandPlan
+from pypackhub.core.deps import RemovalPreview
 from pypackhub.core.platform_guard import ModificationPolicy, Severity
 from pypackhub.core.validation import ValidationError, validate_package_spec
 from pypackhub.ui.i18n.reasons import reason_text
@@ -46,6 +47,7 @@ __all__ = [
     "CreateEnvironmentRequest",
     "DowngradeDialog",
     "InstallDialog",
+    "RemovalPreviewDialog",
     "action_button_key",
     "action_title_key",
 ]
@@ -304,6 +306,129 @@ class BlockedDialog(QDialog):
     @property
     def suggestion_text(self) -> str:
         return self.suggestion_label.text()
+
+
+class RemovalPreviewDialog(QDialog):
+    """The dry run for a removal, shown before the confirmation that runs it.
+
+    This is deliberately *not* the confirmation. The preview exists to be read -
+    what goes, what is left behind, what the request would break - and it ends in
+    Cancel or Continue. Continuing hands the same named packages to the normal
+    confirm-and-run path, so the exact command is still shown and still approved
+    separately. Two steps, because "what would happen" and "do it" are two
+    different questions and merging them is how people uninstall an environment.
+    """
+
+    def __init__(
+        self,
+        *,
+        preview: RemovalPreview,
+        translator: Translator,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._preview = preview
+        self._translator = translator
+        self.setModal(True)
+        self.setMinimumWidth(540)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(translator.translate(TranslationKey.REMOVAL_PREVIEW_TITLE), self)
+        title.setObjectName("pageTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        self.remove_heading = QLabel(self)
+        self.remove_heading.setObjectName("sectionHeading")
+        self.remove_heading.setText(
+            translator.translate(
+                TranslationKey.REMOVAL_PREVIEW_WOULD_REMOVE,
+                count=len(preview.would_remove),
+            )
+        )
+        layout.addWidget(self.remove_heading)
+
+        self.remove_list = QPlainTextEdit(self)
+        self.remove_list.setObjectName("removalList")
+        self.remove_list.setReadOnly(True)
+        self.remove_list.setPlainText("\n".join(preview.would_remove))
+        layout.addWidget(self.remove_list)
+
+        # Anything outside the request is stated, never silently applied.
+        self.unused_label = self._note(
+            TranslationKey.REMOVAL_PREVIEW_LEAVE_UNUSED,
+            preview.would_leave_unused,
+            layout,
+        )
+        self.blocked_label = self._note(
+            TranslationKey.REMOVAL_PREVIEW_BLOCKED,
+            preview.blocked,
+            layout,
+            error=True,
+        )
+        self.breaks_label = self._note(
+            TranslationKey.REMOVAL_PREVIEW_BREAKS,
+            preview.breaks,
+            layout,
+            error=True,
+        )
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            translator.translate(TranslationKey.REMOVAL_PREVIEW_CONTINUE)
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primaryButton")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            translator.translate(TranslationKey.BUTTON_CANCEL)
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def _note(
+        self,
+        key: TranslationKey,
+        names: tuple[str, ...],
+        layout: QVBoxLayout,
+        *,
+        error: bool = False,
+    ) -> QLabel:
+        """Add a conditional note, hidden entirely when it has nothing to say."""
+        label = QLabel(self)
+        label.setObjectName("errorText" if error else "secondaryText")
+        label.setWordWrap(True)
+        if names:
+            listing = ", ".join(names)
+            label.setText(self._translator.translate(key, packages=listing))
+        else:
+            label.setVisible(False)
+        layout.addWidget(label)
+        return label
+
+    @property
+    def preview(self) -> RemovalPreview:
+        return self._preview
+
+    @property
+    def remove_text(self) -> str:
+        return self.remove_list.toPlainText()
+
+    @property
+    def unused_text(self) -> str:
+        return self.unused_label.text()
+
+    @property
+    def blocked_text(self) -> str:
+        return self.blocked_label.text()
+
+    @property
+    def breaks_text(self) -> str:
+        return self.breaks_label.text()
 
 
 @dataclass(frozen=True, slots=True)

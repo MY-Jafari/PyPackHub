@@ -47,6 +47,12 @@ MAX_METADATA_BYTES: Final = 512 * 1024
 #: The suffix pip uses for installed distribution directories.
 DIST_INFO_SUFFIX: Final = ".dist-info"
 
+#: The file an installer writes into a ``.dist-info`` directory when the package
+#: on the command line was the one the user asked for, rather than one pulled in
+#: to satisfy a requirement. Read for orphan detection, nothing more: its absence
+#: is meaningful, its presence is not a promise.
+REQUESTED_MARKER: Final = "REQUESTED"
+
 #: ``site-packages`` locations inside a Python prefix, most specific first.
 _SITE_PACKAGE_GLOBS: Final = (
     "Lib/site-packages",
@@ -83,6 +89,14 @@ class PackageMetadata:
     extras: tuple[str, ...] = ()
     #: Names of the installed distributions that require this one.
     required_by: tuple[str, ...] = field(default=())
+    #: True when the user asked for this package by name.
+    #:
+    #: The installer writes a ``REQUESTED`` marker into the ``.dist-info``
+    #: directory of every distribution named on a command line, and only those.
+    #: It is the installer's own record of "the user wanted this one", which is
+    #: what makes an orphan a fact rather than a guess: a package with no
+    #: dependents *and* no marker was pulled in to satisfy something else.
+    requested: bool = False
 
     @property
     def normalized_name(self) -> str:
@@ -180,9 +194,11 @@ def read_metadata(location: Path) -> PackageMetadata:
     )
     name, _, version = stem.partition("-")
 
+    requested = (location / REQUESTED_MARKER).is_file()
+
     message = _message(location / "METADATA")
     if message is None:
-        return PackageMetadata(name=name, version=version, location=location)
+        return PackageMetadata(name=name, version=version, location=location, requested=requested)
 
     return PackageMetadata(
         name=_field(message, "Name") or name,
@@ -196,6 +212,7 @@ def read_metadata(location: Path) -> PackageMetadata:
         location=location,
         requires=_requirements(message),
         extras=tuple(str(value).strip() for value in message.get_all("Provides-Extra", [])),
+        requested=requested,
     )
 
 

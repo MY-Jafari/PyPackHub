@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The dependency graph and the Dependencies view (section 6, the first Phase 2
+  section), which answer "why is this installed" and "what can go":
+  - `core/deps.py` builds a graph of the installed distributions from their own
+    metadata: direct and transitive requirements, reverse dependencies, cycles,
+    and the shortest chain from a package the user asked for down to any other
+    ("httpie \u2192 requests \u2192 urllib3"). A requirement that is declared but not
+    installed is reported as missing rather than drawn as an edge.
+  - Orphan detection uses the installers' own `REQUESTED` markers as well as the
+    graph, so a package is only unneeded when nothing requires it *and* it was not
+    installed by name. Packages required by nothing but asked for by the user are
+    reported separately and never offered for removal by default.
+  - `preview_removal` is the dry run: what would go, what would be left installed
+    but unused, what is still required by something that is staying, and what
+    would be left with a missing requirement.
+  - The Dependencies view: a filterable package list, the why-installed chain, the
+    requires and required-by trees, missing requirements, the unneeded-package
+    list with its measured size, and a preview dialog before any removal. The page
+    never changes an environment itself - it hands the removal to the packages
+    view, so the exact command and the confirmation stay in one place.
+- Multi-package removal in one plan (`InventoryService.action_for_uninstall_many`),
+  so an unneeded-package clean-up is one command the user approves once.
 - The packages view and the settings page (sections 4 and 5), which together make
   the Phase 1 window usable end to end:
   - The package table (`ui/views/packages.py`): installed packages with their
@@ -111,6 +132,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Qt-free security job could not collect two of its test modules: it installed
+  the project's dependencies from a hand-written list that had gone stale and was
+  missing `platformdirs`, so importing `pypackhub.core.settings` failed. The list
+  is now derived from `pyproject.toml` with the GUI toolkit filtered out, and the
+  job asserts that Qt is really absent so it cannot pass while proving nothing.
+- `astral-sh/setup-uv@v10` does not resolve: the action stopped publishing moving
+  major tags after v8, so the dependency-audit and lock-freshness jobs failed
+  before running a step. Both now pin an exact release.
 - Registering a real view over a destination left its placeholder page in the
   content stack, so the destination had two pages and the re-translation pass
   walked a page the user could never reach. `register_view()` now removes the

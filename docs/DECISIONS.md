@@ -113,6 +113,18 @@ one audited module instead of emitting a warning about it everywhere. B602
 
 Phases 2 to 4 are split the same way once Phase 1 is done and reviewed.
 
+Phase 1 is complete and was committed before phase 2 started, so the same
+section-by-section approach continues. Phase 2's split follows the README roadmap,
+ordered so each section stands on the one before it:
+
+| Section | Contents | Gate |
+| --- | --- | --- |
+| 6 | ✅ Dependency graph: `core/deps.py` (transitive requires and reverse deps, cycles, why-installed chains, orphan detection from the installer's `REQUESTED` markers, removal preview) and the Dependencies view with the preview-removal flow | Graph unit tests plus an offscreen smoke test of the view |
+| 7 | PyPI browsing: the Search view (a package index search, release history) and import/export of requirements files | Mocked index plus an offscreen smoke test |
+| 8 | Trust and supply chain: `trust.py` typosquatting against the bundled popular-package list, the trust panel, and conflict/constraint checks before an install | The Phase 1 typosquatting cases (`reqeusts`, `numpyy`, `pandsa`) warn |
+| 9 | Disk-usage analysis: per-package and per-environment usage, the largest consumers, and cache inspection | Unit tests over a synthetic environment |
+| 10 | Dashboard: the landing view, with environment and package summaries drawn from sections 2-9 | Offscreen smoke test |
+
 ## Notes on section 3
 
 **The theme switch is one call, not a widget walk.** `WindowShell.apply_to()`
@@ -226,3 +238,77 @@ CI strategy table says.
 **Three of the ten destinations are real now.** Packages and Settings are
 registered views; Logs reveals the shared log panel. The other seven are still
 disabled placeholders naming their phase, and the README says so.
+
+## Two CI defects found after Phase 1 shipped
+
+**The Qt-free security job repeated the dependency list by hand, and the list
+gone stale.** The job installs the project with `--no-deps` on purpose, so a
+missing runtime dependency cannot be hidden by the GUI toolkit being present. It
+then re-listed the dependencies it wanted - and `platformdirs` was not on the
+list, so `pypackhub.core.settings` could not be imported and two Qt-free test
+modules failed to collect. The list is now derived from `pyproject.toml` with
+`PySide6` filtered out, so it cannot drift from the package again, and the job
+asserts that Qt really is absent: otherwise it could start passing while proving
+nothing.
+
+**A moving major tag on a third-party action no longer resolves.** `setup-uv`
+stopped publishing moving major tags after v8, so `astral-sh/setup-uv@v10` does
+not exist and both jobs using it failed before running a step. The version is now
+pinned to an exact release. Action versions in this project are pinned rather than
+tracked for the same reason the dependency locks are: a workflow that silently
+changes underneath the repository is not reproducible.
+
+## Notes on section 6
+
+**An edge is evidence, not a guess.** The graph is built only from what the
+installed distributions declare about themselves and from the installers' own
+markers. A requirement that is declared but not installed is *not* an edge - an
+edge to something that is not there is not a relationship between two installed
+packages - so it is reported separately as missing. That distinction is what turns
+"this environment is broken" from a silent non-fact into a line in the view.
+
+**Orphans need two absences, not one.** ``pip install X`` writes a ``REQUESTED``
+marker into ``X``'s ``.dist-info`` directory, and only for the packages named on a
+command line. So a package is only unneeded when nothing installed requires it
+*and* there is no marker. Without the second half every package the user installed
+on purpose but that nothing else uses would be listed as rubbish, which is the
+fastest way to make a clean-up feature dangerous. The markers give the page a
+second, smaller list - required by nothing, asked for by name - which is reported
+so the count is not a surprise and never offered for removal by default.
+
+**Reverse edges are derived, never read.** ``InstalledMetadataIndex`` computes its
+own ``required_by``, but the graph inverts its forward edges instead. Two
+directions of the same relationship cannot then disagree, reading either one is
+consistent, and a package whose own metadata was unreadable still shows what
+requires it rather than the reverse view going blind because one file failed to
+parse.
+
+**"Why is this installed?" is the feature, not the tree.** A dependency tree is a
+lot of lines to answer a question whose answer is usually one short chain, so the
+chain is stated first and in a sentence a person can read: *httpie → requests →
+urllib3*. The traversal is breadth-first from every package the user asked for at
+once, so the chain that arrives first is a shortest one, and a package with no
+such chain is exactly an orphan - the two answers agree by construction rather
+than by two implementations agreeing by luck.
+
+**The dry run is the preview, and it is exact about what it can see.**
+``preview_removal`` computes what a removal would do from the graph: what goes,
+what would be left installed but unused, what is still required by something that
+is staying, and what would be left with a missing requirement. It is deliberately
+*not* the confirmation - the preview ends in Cancel or Continue, and continuing
+hands the same package names to the packages view's confirm-and-run path, which
+shows the exact command and asks separately. Two questions, two answers, because
+merging them is how someone uninstalls an environment.
+
+**The dependencies page cannot change anything.** It emits a
+``PackageAction`` and the window gives it to the packages view. That keeps the
+spec's "one path that changes an environment" true even though a second page now
+has a button that looks like it uninstalls things, and it means the confirmation,
+the policy check and the log panel are shared rather than reimplemented.
+
+**The graph is read when someone looks at it.** ``show_view`` refreshes the page
+rather than the window scanning at startup, and ``refresh`` refuses to start a
+second scan while one is running, so switching back and forth does not queue work.
+Reading is a worker-thread job like every other long pass, and the result arrives
+as a signal - including for a *cyclic* environment, which renders as a finite tree
+with one marked edge instead of hanging the UI thread.

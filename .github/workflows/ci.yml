@@ -109,7 +109,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        # An exact version, not a major alias: setup-uv stopped publishing
+        # moving major tags after v8, so a bare `@v10` does not resolve.
+        uses: astral-sh/setup-uv@v10.2.0
 
       - name: Regenerate the locks from pyproject.toml
         run: bash scripts/generate_locks.sh

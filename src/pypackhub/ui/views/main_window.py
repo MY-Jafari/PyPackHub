@@ -53,6 +53,7 @@ from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.theme.design_tokens import DesignTokens
 from pypackhub.ui.views import ViewName
+from pypackhub.ui.views.dependencies import DependenciesView
 from pypackhub.ui.views.packages import PackagesView
 from pypackhub.ui.views.settings import SettingsView
 from pypackhub.ui.views.window_shell import WindowShell
@@ -115,6 +116,7 @@ NAVIGATION: tuple[NavigationEntry, ...] = (
         ViewName.DEPENDENCIES,
         TranslationKey.NAV_DEPENDENCIES,
         TranslationKey.VIEW_PLACEHOLDER_DEPENDENCIES,
+        available=True,
     ),
     NavigationEntry(
         ViewName.SEARCH,
@@ -303,6 +305,19 @@ class MainWindow(QMainWindow):
         self._settings_view.load_settings(self._shell.settings)
         self.register_view(ViewName.SETTINGS, self._settings_view)
 
+        # The dependencies view reads the same environment the packages view
+        # shows, and it never changes anything itself: a removal it previews is
+        # handed to the packages view, so there is still exactly one place that
+        # shows the command and gets the user's approval before it runs.
+        self._dependencies_view = DependenciesView(
+            context=self._context,
+            shell=self._shell,  # nosec B604
+            parent=self,
+        )
+        self.register_view(ViewName.DEPENDENCIES, self._dependencies_view)
+        self._dependencies_view.status_changed.connect(self._on_status_changed)
+        self._dependencies_view.removal_requested.connect(self._packages.confirm_and_run)
+
         # Everything the packages view reports lands in the window: the status
         # bar for progress, the toast host for outcomes, and the log panel (which
         # the view writes to directly).
@@ -336,6 +351,13 @@ class MainWindow(QMainWindow):
             return
         self._current_view = name
         self._stack.setCurrentWidget(page)
+
+        # The dependency graph is only worth reading when someone is looking at
+        # it, so opening the page is what reads it. `refresh` refuses to start a
+        # second scan while one is running, so switching back and forth does not
+        # queue up work.
+        if name is ViewName.DEPENDENCIES:
+            self._dependencies_view.refresh()
 
         for view_name, nav_button in self._nav_buttons.items():
             nav_button.setChecked(view_name is name)
@@ -635,7 +657,7 @@ class MainWindow(QMainWindow):
             page = self._stack.widget(index)
             if isinstance(page, PlaceholderView):
                 page.retranslate(shell)
-            elif isinstance(page, SettingsView):
+            elif isinstance(page, (SettingsView, DependenciesView)):
                 page.retranslate()
 
         self._view_menu.setTitle(shell.text(TranslationKey.MENU_VIEW))

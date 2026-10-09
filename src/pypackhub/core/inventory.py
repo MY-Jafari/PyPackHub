@@ -507,6 +507,20 @@ class InventoryService:
             user=user,
         )
 
+    def action_for_uninstall_many(self, names: Iterable[str]) -> PackageAction:
+        """One removal plan for a set of packages, e.g. an orphan clean-up.
+
+        A single plan rather than one per package on purpose: the user approves
+        one command, sees one command in the confirmation, and the installer
+        resolves the set in one pass instead of being run N times.
+        """
+        selected = tuple(name for name in names if name)
+        return PackageAction(
+            kind=ActionKind.UNINSTALL,
+            environment=self._prefix,
+            names=selected,
+        )
+
     def action_for_upgrade_all(self, inventory: Inventory, *, user: bool = False) -> PackageAction:
         """One plan that upgrades every outdated package in the inventory."""
         specs = self.outdated_names(inventory)

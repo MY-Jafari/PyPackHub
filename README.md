@@ -31,7 +31,9 @@ purpose:
 | Theme, translations (English + Persian RTL), window shell | ✅ done (section 3) |
 | Package table, install/uninstall/upgrade with confirmations and live log | ✅ done (section 4) |
 | Settings page, PEP 668 "create a virtual environment" flow | ✅ done (section 5) |
-| Dependency graph, security scanning, snapshots, environment management | 📋 later phases |
+| Dependency graph, reverse dependencies, unneeded-package clean-up with a preview | ✅ done (section 6) |
+| PyPI browsing, trust and supply chain, disk usage, dashboard | 🚧 phase 2 |
+| Security scanning, snapshots, environment management | 📋 later phases |
 
 The full plan, the phase breakdown and every decision taken so far live in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
@@ -73,6 +75,12 @@ The window opens on the package table for the environment it picked by default.
   goes through one path: the plan is built, the platform guard decides whether the
   environment may be changed at all, and a confirmation shows the *exact* command
   and the environment it targets before anything runs. Nothing changes silently.
+* **Dependencies** answers three questions in the order people ask them. Select a
+  package and it says *why* it is installed - the chain of package names from the
+  one you asked for down to this one, or plainly that nothing needs it - then shows
+  what it requires and what requires it, both as trees, and flags anything it
+  declares that is not installed. Below that it lists the packages nothing needs
+  and you never asked for by name, and offers a **preview** before they go.
 * **The log panel** at the bottom streams the command's own output as it runs, and
   its Cancel button stops the process tree - not just the process.
 * **Settings** edits the theme, the language, the table page size, the sidebar
@@ -94,8 +102,8 @@ which builds one with `python -m venv`, streams the progress into the log panel
 where it can be cancelled, and switches the window to the new environment when it
 is done.
 
-Most destinations - the dashboard, environments, dependencies, security,
-snapshots and history - are later phases and open a placeholder naming the phase
+The remaining destinations - the dashboard, environments, PyPI search, security,
+snapshots and history - are later work and open a placeholder naming the phase
 that builds them. The navigation entry is disabled rather than hidden, so where a
 feature will live is never a surprise.
 
