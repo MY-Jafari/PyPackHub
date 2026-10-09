@@ -93,9 +93,35 @@ class TranslationKey(str, Enum):
     SETTINGS_RESET = "settings.reset"
     SETTINGS_SIDEBAR_WIDTH = "settings.sidebar_width"
     SETTINGS_PACKAGE_PAGE_SIZE = "settings.package_page_size"
+    SETTINGS_PACKAGES_PER_PAGE_UNITS = "settings.packages_per_page_units"
     SETTINGS_PYPI_INDEX = "settings.pypi_index"
+    SETTINGS_PYPI_EXTRA_INDEX_URLS = "settings.pypi_extra_index_urls"
+    SETTINGS_PYPI_TRUSTED_HOSTS = "settings.pypi_trusted_hosts"
+    SETTINGS_LINES_HINT = "settings.lines_hint"
+    SETTINGS_PYPI = "settings.pypi"
+    SETTINGS_TABLE = "settings.table"
+    SETTINGS_BEHAVIOUR = "settings.behaviour"
+    SETTINGS_SHOW_SIZES = "settings.show_sizes"
+    SETTINGS_SHOW_OUTDATED = "settings.show_outdated"
+    SETTINGS_CONFIRM_INSTALL = "settings.confirm_install"
+    SETTINGS_CONFIRM_UNINSTALL = "settings.confirm_uninstall"
+    SETTINGS_CONFIRM_UPGRADE = "settings.confirm_upgrade"
     SETTINGS_SAVE = "settings.save"
     SETTINGS_CANCEL = "settings.cancel"
+
+    CREATE_ENV_TITLE = "create_env.title"
+    CREATE_ENV_INTRO = "create_env.intro"
+    CREATE_ENV_LOCATION = "create_env.location"
+    CREATE_ENV_INTERPRETER = "create_env.interpreter"
+    CREATE_ENV_INTERPRETER_HINT = "create_env.interpreter_hint"
+    CREATE_ENV_LOCATION_REQUIRED = "create_env.location_required"
+    CREATE_ENV_INTERPRETER_ABSOLUTE = "create_env.interpreter_absolute"
+    CREATE_ENV_BUTTON = "create_env.button"
+    CREATE_ENV_RUNNING = "create_env.running"
+    CREATE_ENV_CREATED = "create_env.created"
+    CREATE_ENV_FAILED = "create_env.failed"
+    CREATE_ENV_CANCELLED = "create_env.cancelled"
+    BLOCKED_CREATE_ENVIRONMENT = "blocked.create_environment"
 
     PACKAGES_TITLE = "packages.title"
     PACKAGES_SEARCH = "packages.search"
@@ -281,9 +307,40 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_RESET: "Reset",
     TranslationKey.SETTINGS_SIDEBAR_WIDTH: "Sidebar width",
     TranslationKey.SETTINGS_PACKAGE_PAGE_SIZE: "Packages per page",
+    TranslationKey.SETTINGS_PACKAGES_PER_PAGE_UNITS: "packages",
     TranslationKey.SETTINGS_PYPI_INDEX: "PyPI index URL",
+    TranslationKey.SETTINGS_PYPI_EXTRA_INDEX_URLS: "Extra index URLs",
+    TranslationKey.SETTINGS_PYPI_TRUSTED_HOSTS: "Trusted hosts",
+    TranslationKey.SETTINGS_PYPI: "PyPI",
+    TranslationKey.SETTINGS_TABLE: "Table",
+    TranslationKey.SETTINGS_BEHAVIOUR: "Behaviour",
+    TranslationKey.SETTINGS_SHOW_SIZES: "Show package sizes",
+    TranslationKey.SETTINGS_SHOW_OUTDATED: "Show outdated packages",
+    TranslationKey.SETTINGS_LINES_HINT: "one entry per line, or leave empty",
+    TranslationKey.SETTINGS_CONFIRM_INSTALL: "Confirm before installing",
+    TranslationKey.SETTINGS_CONFIRM_UNINSTALL: "Confirm before uninstalling",
+    TranslationKey.SETTINGS_CONFIRM_UPGRADE: "Confirm before upgrading",
     TranslationKey.SETTINGS_SAVE: "Save",
     TranslationKey.SETTINGS_CANCEL: "Cancel",
+    TranslationKey.CREATE_ENV_TITLE: "Create a virtual environment",
+    TranslationKey.CREATE_ENV_INTRO: (
+        "A virtual environment is a private package folder. Nothing outside it "
+        "is touched, so this is the safe way to install packages on a system "
+        "interpreter that refuses changes."
+    ),
+    TranslationKey.CREATE_ENV_LOCATION: "Folder",
+    TranslationKey.CREATE_ENV_INTERPRETER: "Interpreter",
+    TranslationKey.CREATE_ENV_INTERPRETER_HINT: (
+        "Leave empty to use the interpreter PyPackHub is running on."
+    ),
+    TranslationKey.CREATE_ENV_LOCATION_REQUIRED: "Choose a folder for the environment.",
+    TranslationKey.CREATE_ENV_INTERPRETER_ABSOLUTE: ("The interpreter path must be absolute."),
+    TranslationKey.CREATE_ENV_BUTTON: "Create",
+    TranslationKey.CREATE_ENV_RUNNING: "Creating the virtual environment...",
+    TranslationKey.CREATE_ENV_CREATED: "Created %(prefix)s",
+    TranslationKey.CREATE_ENV_FAILED: "Could not create the environment: %(error)s",
+    TranslationKey.CREATE_ENV_CANCELLED: "Environment creation cancelled",
+    TranslationKey.BLOCKED_CREATE_ENVIRONMENT: "Create a virtual environment",
     TranslationKey.PACKAGES_TITLE: "Packages",
     TranslationKey.PACKAGES_SEARCH: "Search packages...",
     TranslationKey.PACKAGES_SUMMARY: "Summary",
@@ -462,9 +519,39 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_RESET: "بازنشانی",
     TranslationKey.SETTINGS_SIDEBAR_WIDTH: "پهنای نوار کناری",
     TranslationKey.SETTINGS_PACKAGE_PAGE_SIZE: "تعداد بسته در هر صفحه",
+    TranslationKey.SETTINGS_PACKAGES_PER_PAGE_UNITS: "بسته",
     TranslationKey.SETTINGS_PYPI_INDEX: "نشانی نمایهٔ پای‌پی‌آی",
+    TranslationKey.SETTINGS_PYPI_EXTRA_INDEX_URLS: "نشانی‌های نمایهٔ اضافی",
+    TranslationKey.SETTINGS_PYPI_TRUSTED_HOSTS: "میزبان‌های مورد اعتماد",
+    TranslationKey.SETTINGS_PYPI: "پای‌پی‌آی",
+    TranslationKey.SETTINGS_TABLE: "جداول",
+    TranslationKey.SETTINGS_BEHAVIOUR: "رفتار",
+    TranslationKey.SETTINGS_SHOW_SIZES: "نمایش اندازه‌های بسته‌ها",
+    TranslationKey.SETTINGS_SHOW_OUTDATED: "نمایش بسته‌های فرسوده",
+    TranslationKey.SETTINGS_LINES_HINT: "هر مورد در یک خط، یا خالی بگذارید",
+    TranslationKey.SETTINGS_CONFIRM_INSTALL: "تأیید قبل از نصب",
+    TranslationKey.SETTINGS_CONFIRM_UNINSTALL: "تأیید قبل از حذف",
+    TranslationKey.SETTINGS_CONFIRM_UPGRADE: "تأیید قبل از ارتقا",
     TranslationKey.SETTINGS_SAVE: "ذخیره",
     TranslationKey.SETTINGS_CANCEL: "لغو",
+    TranslationKey.CREATE_ENV_TITLE: "ساخت محیط مجازی",
+    TranslationKey.CREATE_ENV_INTRO: (
+        "محیط مجازی یک پوشهٔ خصوصی برای بسته‌ها است. هیچ‌چیز بیرون از آن تغییر "
+        "نمی‌کند، پس راه ایمن نصب بسته روی مفسری است که تغییر را رد می‌کند."
+    ),
+    TranslationKey.CREATE_ENV_LOCATION: "پوشه",
+    TranslationKey.CREATE_ENV_INTERPRETER: "مفسر",
+    TranslationKey.CREATE_ENV_INTERPRETER_HINT: (
+        "برای استفاده از مفسری که PyPackHub با آن اجرا می‌شود خالی بگذارید."
+    ),
+    TranslationKey.CREATE_ENV_LOCATION_REQUIRED: "پوشه‌ای برای محیط انتخاب کنید.",
+    TranslationKey.CREATE_ENV_INTERPRETER_ABSOLUTE: "مسیر مفسر باید مطلق باشد.",
+    TranslationKey.CREATE_ENV_BUTTON: "ساخت",
+    TranslationKey.CREATE_ENV_RUNNING: "در حال ساخت محیط مجازی...",
+    TranslationKey.CREATE_ENV_CREATED: "%(prefix)s ساخته شد",
+    TranslationKey.CREATE_ENV_FAILED: "ساخت محیط ناموفق بود: %(error)s",
+    TranslationKey.CREATE_ENV_CANCELLED: "ساخت محیط لغو شد",
+    TranslationKey.BLOCKED_CREATE_ENVIRONMENT: "ساخت محیط مجازی",
     TranslationKey.PACKAGES_TITLE: "بسته‌ها",
     TranslationKey.PACKAGES_SEARCH: "جست‌وجوی بسته‌ها...",
     TranslationKey.PACKAGES_SUMMARY: "توضیح",

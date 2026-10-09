@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +42,8 @@ from pypackhub.ui.i18n.translator import Translator
 __all__ = [
     "BlockedDialog",
     "ConfirmationDialog",
+    "CreateEnvironmentDialog",
+    "CreateEnvironmentRequest",
     "DowngradeDialog",
     "InstallDialog",
     "action_button_key",
@@ -211,18 +214,28 @@ class ConfirmationDialog(QDialog):
 
 
 class BlockedDialog(QDialog):
-    """Explains why an action was refused, and what to do instead."""
+    """Explains why an action was refused, and what to do instead.
+
+    When the refusal is the one the user can actually act on - a system or
+    PEP 668 interpreter that only accepts packages inside a virtual environment -
+    the dialog also offers to create one, and reports that through
+    :attr:`wants_create_environment` (accepted-with-a-request rather than a
+    plain "Close"). Anything else stays a dead end by design: there is no button
+    that would talk the user into overriding a refusal.
+    """
 
     def __init__(
         self,
         *,
         policy: ModificationPolicy,
         translator: Translator,
+        offer_create_environment: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._policy = policy
         self._translator = translator
+        self._wants_create = False
         self.setModal(True)
         self.setMinimumWidth(480)
 
@@ -262,7 +275,27 @@ class BlockedDialog(QDialog):
             translator.translate(TranslationKey.BUTTON_CLOSE)
         )
         self.buttons.rejected.connect(self.reject)
+
+        # The call-to-action is an extra button rather than a replacement for
+        # Close, so declining the suggestion is still one obvious click.
+        self.create_button: QPushButton | None = None
+        if offer_create_environment:
+            self.create_button = QPushButton(
+                translator.translate(TranslationKey.BLOCKED_CREATE_ENVIRONMENT), self
+            )
+            self.create_button.setObjectName("primaryButton")
+            self.create_button.clicked.connect(self._request_create)
+            self.buttons.addButton(self.create_button, QDialogButtonBox.ButtonRole.AcceptRole)
         layout.addWidget(self.buttons)
+
+    def _request_create(self) -> None:
+        """The user took the offer; record it and close as accepted."""
+        self._wants_create = True
+        self.accept()
+
+    @property
+    def wants_create_environment(self) -> bool:
+        return self._wants_create
 
     @property
     def reason_text_value(self) -> str:
@@ -271,6 +304,138 @@ class BlockedDialog(QDialog):
     @property
     def suggestion_text(self) -> str:
         return self.suggestion_label.text()
+
+
+@dataclass(frozen=True, slots=True)
+class CreateEnvironmentRequest:
+    """What the create-environment dialog collected.
+
+    *location* is the folder the environment will live in; *interpreter* is the
+    absolute path of the interpreter to build it with, or ``None`` for the one
+    PyPackHub is running on.
+    """
+
+    location: str
+    interpreter: str | None = None
+
+
+class CreateEnvironmentDialog(QDialog):
+    """Collects where to put a virtual environment and which interpreter to use.
+
+    The dialog only gathers input: creating the environment is a real action that
+    runs on a worker thread, streams into the log panel and can be cancelled, so
+    it belongs with the rest of the changing actions - not in a modal that would
+    freeze the window until ``venv`` finished.
+    """
+
+    def __init__(
+        self,
+        *,
+        translator: Translator,
+        default_location: str = ".venv",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._translator = translator
+
+        self.setModal(True)
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(translator.translate(TranslationKey.CREATE_ENV_TITLE), self)
+        title.setObjectName("pageTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        self.intro_label = QLabel(translator.translate(TranslationKey.CREATE_ENV_INTRO), self)
+        self.intro_label.setObjectName("secondaryText")
+        self.intro_label.setWordWrap(True)
+        layout.addWidget(self.intro_label)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.location_edit = QLineEdit(self)
+        self.location_edit.setText(default_location)
+        self.location_edit.setPlaceholderText(".venv")
+        self.location_edit.textChanged.connect(self._clear_error)
+        form.addRow(translator.translate(TranslationKey.CREATE_ENV_LOCATION), self.location_edit)
+
+        self.interpreter_edit = QLineEdit(self)
+        self.interpreter_edit.setPlaceholderText(
+            translator.translate(TranslationKey.CREATE_ENV_INTERPRETER_HINT)
+        )
+        self.interpreter_edit.textChanged.connect(self._clear_error)
+        form.addRow(
+            translator.translate(TranslationKey.CREATE_ENV_INTERPRETER), self.interpreter_edit
+        )
+        layout.addLayout(form)
+
+        self.error_label = QLabel(self)
+        self.error_label.setObjectName("errorText")
+        self.error_label.setWordWrap(True)
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            translator.translate(TranslationKey.CREATE_ENV_BUTTON)
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primaryButton")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            translator.translate(TranslationKey.BUTTON_CANCEL)
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    @property
+    def location(self) -> str:
+        return self.location_edit.text().strip()
+
+    @property
+    def interpreter(self) -> str:
+        return self.interpreter_edit.text().strip()
+
+    @property
+    def error(self) -> str:
+        return self.error_label.text()
+
+    def value(self) -> CreateEnvironmentRequest:
+        return CreateEnvironmentRequest(
+            location=self.location,
+            interpreter=self.interpreter or None,
+        )
+
+    def accept(self) -> None:
+        """Refuse an empty folder or a relative interpreter before closing."""
+        if not self.location:
+            self._show_error(TranslationKey.CREATE_ENV_LOCATION_REQUIRED)
+            return
+
+        interpreter = self.interpreter
+        if interpreter:
+            from pathlib import Path
+
+            # ``core.environments.create_environment`` refuses a relative path,
+            # so the same rule is applied here where it can be explained.
+            if not Path(interpreter).expanduser().is_absolute():
+                self._show_error(TranslationKey.CREATE_ENV_INTERPRETER_ABSOLUTE)
+                return
+
+        super().accept()
+
+    def _show_error(self, key: TranslationKey) -> None:
+        self.error_label.setText(self._translator.translate(key))
+        self.error_label.setVisible(True)
+
+    def _clear_error(self) -> None:
+        self.error_label.setVisible(False)
 
 
 @dataclass(frozen=True, slots=True)

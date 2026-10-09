@@ -54,6 +54,7 @@ from pypackhub.ui.services import UiContext
 from pypackhub.ui.theme.design_tokens import DesignTokens
 from pypackhub.ui.views import ViewName
 from pypackhub.ui.views.packages import PackagesView
+from pypackhub.ui.views.settings import SettingsView
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.log_panel import LogPanel
 from pypackhub.ui.widgets.toast import ToastHost, ToastKind
@@ -146,6 +147,7 @@ NAVIGATION: tuple[NavigationEntry, ...] = (
         ViewName.SETTINGS,
         TranslationKey.NAV_SETTINGS,
         TranslationKey.VIEW_PLACEHOLDER_SETTINGS,
+        available=True,
     ),
 )
 
@@ -262,6 +264,14 @@ class MainWindow(QMainWindow):
         Later phases call this. The navigation entry switches to enabled and the
         stack shows the widget; nothing else in the window has to change.
         """
+        # The placeholder the entry was born with is replaced, not just covered:
+        # leaving it in the stack would give the destination two pages and make
+        # the re-translation pass walk a page the user can never reach.
+        placeholder = self._placeholders.pop(name, None)
+        if placeholder is not None:
+            self._stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+
         self._views[name] = view
         self._stack.addWidget(view)
         button = self._nav_buttons.get(name)
@@ -281,6 +291,17 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self.register_view(ViewName.PACKAGES, self._packages)
+
+        # The settings page reads/writes through the shell so a change is
+        # validated, re-translated and re-themed in one place. (``shell=`` is the
+        # window shell, not a command shell: the same bandit B604 false positive
+        # as the PackagesView call above.)
+        self._settings_view = SettingsView(
+            shell=self._shell,  # nosec B604
+            parent=self,
+        )
+        self._settings_view.load_settings(self._shell.settings)
+        self.register_view(ViewName.SETTINGS, self._settings_view)
 
         # Everything the packages view reports lands in the window: the status
         # bar for progress, the toast host for outcomes, and the log panel (which
@@ -310,7 +331,9 @@ class MainWindow(QMainWindow):
 
         page = self._views.get(name)
         if page is None:
-            page = self._placeholder_for(name)
+            page = self._placeholders.get(name)
+        if page is None:
+            return
         self._current_view = name
         self._stack.setCurrentWidget(page)
 
@@ -337,9 +360,12 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self._sidebar)
 
         self._stack = QStackedWidget(body)
+        self._placeholders: dict[ViewName, QWidget] = {}
         for entry in NAVIGATION:
             if entry.kind is EntryKind.PAGE:
-                self._stack.addWidget(self._placeholder_for(entry.name))
+                placeholder = self._placeholder_for(entry.name)
+                self._placeholders[entry.name] = placeholder
+                self._stack.addWidget(placeholder)
         body_layout.addWidget(self._stack, 1)
 
         # The log panel is shared: one instance, docked under the content, used by
@@ -609,6 +635,8 @@ class MainWindow(QMainWindow):
             page = self._stack.widget(index)
             if isinstance(page, PlaceholderView):
                 page.retranslate(shell)
+            elif isinstance(page, SettingsView):
+                page.retranslate()
 
         self._view_menu.setTitle(shell.text(TranslationKey.MENU_VIEW))
         self._theme_action.setText(shell.text(TranslationKey.SETTINGS_THEME))

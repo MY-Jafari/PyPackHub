@@ -1,0 +1,294 @@
+"""The settings page.
+
+It renders the settings :class:`~pypackhub.core.settings.AppSettings` exposes,
+lets the user change the ones that are safe to expose in a settings page, and
+writes back through the :class:`~pypackhub.ui.views.window_shell.WindowShell` the
+window owns so a change is validated, re-translated and re-themed in one place.
+
+Nothing here reaches the core directly: it asks the shell for a settings snapshot,
+shows it, and writes a validated copy back when the user applies. The shell is also
+what re-translates and re-themes the window after a change, so the settings page
+does not need to know about the rest of the window at all.
+
+Every piece of chrome the page owns - the group titles, the row labels, the combo
+entries, the spin-box suffix and the placeholders - is registered in a lookup so
+:meth:`SettingsView.retranslate` can re-render all of it. A settings page that
+half-switches language is worse than one that does not switch at all.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QLabel,
+    QLineEdit,
+    QSpinBox,
+    QWidget,
+)
+
+from pypackhub.core.settings import (
+    AppSettings,
+    ColorTheme,
+    Language,
+    validate_settings,
+)
+from pypackhub.ui.i18n.translations import TranslationKey
+from pypackhub.ui.views.window_shell import WindowShell
+
+
+class SettingsView(QWidget):
+    """A page that edits the application settings the user is allowed to change.
+
+    The page is re-translated by the window's ``retranslate`` pass, so every label
+    follows the current language without the page having to know when that happens.
+    """
+
+    def __init__(self, *, shell: WindowShell, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._shell = shell
+        # Set while ``load_settings`` writes into the controls: it stops the
+        # change handlers from reading half-populated fields and validating them.
+        self._loading = False
+
+        # Chrome, keyed by the translation key that produced it, so a language
+        # switch can re-render every part of the page in one pass.
+        self._groups: dict[TranslationKey, QGroupBox] = {}
+        self._labels: dict[TranslationKey, QLabel] = {}
+        self._line_edits: list[QLineEdit] = []
+
+        layout = QFormLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        # -- appearance ----------------------------------------------------------
+
+        appearance_layout = self._group(layout, TranslationKey.SETTINGS_TITLE)
+
+        self._theme_combo = QComboBox(self)
+        self._theme_combo.setObjectName("settingsCombo")
+        self._theme_combo.setMinimumWidth(160)
+        for theme_member in ColorTheme:
+            self._theme_combo.addItem(self._theme_label(theme_member), theme_member.value)
+        appearance_layout.addRow(self._label(TranslationKey.SETTINGS_THEME), self._theme_combo)
+
+        self._language_combo = QComboBox(self)
+        self._language_combo.setObjectName("settingsCombo")
+        self._language_combo.setMinimumWidth(160)
+        for language_member in Language:
+            self._language_combo.addItem(
+                self._language_label(language_member), language_member.value
+            )
+        appearance_layout.addRow(
+            self._label(TranslationKey.SETTINGS_LANGUAGE), self._language_combo
+        )
+
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        self._language_combo.currentIndexChanged.connect(self._on_language_changed)
+
+        # -- table ---------------------------------------------------------------
+
+        table_layout = self._group(layout, TranslationKey.SETTINGS_TABLE)
+
+        self._page_size = QSpinBox(self)
+        self._page_size.setObjectName("settingsSpinBox")
+        self._page_size.setMinimum(10)
+        self._page_size.setMaximum(500)
+        self._page_size.setSingleStep(10)
+        self._page_size.setSuffix(" " + self._text(TranslationKey.SETTINGS_PACKAGES_PER_PAGE_UNITS))
+        table_layout.addRow(self._label(TranslationKey.SETTINGS_PACKAGE_PAGE_SIZE), self._page_size)
+
+        self._sidebar_width = QSpinBox(self)
+        self._sidebar_width.setObjectName("settingsSpinBox")
+        self._sidebar_width.setMinimum(80)
+        self._sidebar_width.setMaximum(600)
+        self._sidebar_width.setSingleStep(10)
+        self._sidebar_width.setSuffix(" px")
+        table_layout.addRow(self._label(TranslationKey.SETTINGS_SIDEBAR_WIDTH), self._sidebar_width)
+
+        # -- PyPI ----------------------------------------------------------------
+
+        pypi_layout = self._group(layout, TranslationKey.SETTINGS_PYPI)
+
+        self._index_url = self._line_edit(pypi_layout, TranslationKey.SETTINGS_PYPI_INDEX)
+        self._index_url.setPlaceholderText("https://pypi.org/simple")
+
+        self._extra_index_urls = self._line_edit(
+            pypi_layout, TranslationKey.SETTINGS_PYPI_EXTRA_INDEX_URLS
+        )
+        self._trusted_hosts = self._line_edit(
+            pypi_layout, TranslationKey.SETTINGS_PYPI_TRUSTED_HOSTS
+        )
+
+        # -- behaviour -----------------------------------------------------------
+
+        behaviour_layout = self._group(layout, TranslationKey.SETTINGS_BEHAVIOUR)
+
+        self._confirm_install = QCheckBox(self)
+        self._confirm_install.setObjectName("settingsCheckBox")
+        behaviour_layout.addRow(
+            self._label(TranslationKey.SETTINGS_CONFIRM_INSTALL), self._confirm_install
+        )
+
+        self._confirm_uninstall = QCheckBox(self)
+        self._confirm_uninstall.setObjectName("settingsCheckBox")
+        behaviour_layout.addRow(
+            self._label(TranslationKey.SETTINGS_CONFIRM_UNINSTALL), self._confirm_uninstall
+        )
+
+        self._confirm_upgrade = QCheckBox(self)
+        self._confirm_upgrade.setObjectName("settingsCheckBox")
+        behaviour_layout.addRow(
+            self._label(TranslationKey.SETTINGS_CONFIRM_UPGRADE), self._confirm_upgrade
+        )
+
+        self._show_sizes = QCheckBox(self)
+        self._show_sizes.setObjectName("settingsCheckBox")
+        behaviour_layout.addRow(self._label(TranslationKey.SETTINGS_SHOW_SIZES), self._show_sizes)
+
+        self._show_outdated = QCheckBox(self)
+        self._show_outdated.setObjectName("settingsCheckBox")
+        behaviour_layout.addRow(
+            self._label(TranslationKey.SETTINGS_SHOW_OUTDATED), self._show_outdated
+        )
+
+        layout.addRow(QWidget(self))
+
+    # -- construction helpers ---------------------------------------------------
+
+    def _group(self, layout: QFormLayout, key: TranslationKey) -> QFormLayout:
+        """Add a titled group box for *key* and return its form layout."""
+        box = QGroupBox(self)
+        box.setObjectName("settingsGroup")
+        box.setTitle(self._shell.text(key))
+        inner = QFormLayout(box)
+        inner.setContentsMargins(12, 18, 12, 12)
+        inner.setSpacing(8)
+        layout.addWidget(box)
+        self._groups[key] = box
+        return inner
+
+    def _line_edit(self, layout: QFormLayout, key: TranslationKey) -> QLineEdit:
+        """Add a labelled text field, registered for re-translation."""
+        edit = QLineEdit(self)
+        edit.setObjectName("settingsLineEdit")
+        edit.setPlaceholderText(self._shell.text(TranslationKey.SETTINGS_LINES_HINT))
+        layout.addRow(self._label(key), edit)
+        self._line_edits.append(edit)
+        return edit
+
+    def _label(self, key: TranslationKey) -> QLabel:
+        label = QLabel(self)
+        label.setObjectName("settingsLabel")
+        label.setText(self._shell.text(key))
+        label.setWordWrap(True)
+        self._labels[key] = label
+        return label
+
+    def _text(self, key: TranslationKey) -> str:
+        return self._shell.text(key)
+
+    @staticmethod
+    def _theme_label(member: ColorTheme) -> str:
+        return {
+            ColorTheme.SYSTEM: "system",
+            ColorTheme.LIGHT: "light",
+            ColorTheme.DARK: "dark",
+        }[member]
+
+    @staticmethod
+    def _language_label(member: Language) -> str:
+        return {
+            Language.SYSTEM: "system",
+            Language.EN: "en",
+            Language.FA: "\u0641\u0627",
+        }[member]
+
+    # -- population -------------------------------------------------------------
+
+    def load_settings(self, settings: AppSettings) -> None:
+        """Show *settings* in the controls the page owns."""
+        self._loading = True
+        try:
+            self._theme_combo.setCurrentIndex(list(ColorTheme).index(settings.theme))
+            self._language_combo.setCurrentIndex(list(Language).index(settings.language))
+            self._page_size.setValue(settings.package_list_page_size)
+            self._sidebar_width.setValue(settings.sidebar_width)
+            self._index_url.setText(settings.pypi_index_url)
+            self._extra_index_urls.setText("\n".join(settings.extra_index_urls))
+            self._trusted_hosts.setText("\n".join(settings.trusted_hosts))
+            self._confirm_install.setChecked(settings.confirm_before_install)
+            self._confirm_uninstall.setChecked(settings.confirm_before_uninstall)
+            self._confirm_upgrade.setChecked(settings.confirm_before_upgrade)
+            self._show_sizes.setChecked(settings.show_sizes_by_default)
+            self._show_outdated.setChecked(settings.show_outdated_by_default)
+        finally:
+            self._loading = False
+
+    def current_settings(self) -> AppSettings:
+        """Return the settings the controls currently describe, validated."""
+        return validate_settings(
+            AppSettings(
+                theme=list(ColorTheme)[self._theme_combo.currentIndex()],
+                language=list(Language)[self._language_combo.currentIndex()],
+                package_list_page_size=self._page_size.value(),
+                sidebar_width=self._sidebar_width.value(),
+                pypi_index_url=self._index_url.text().strip(),
+                extra_index_urls=_lines(self._extra_index_urls.text()),
+                trusted_hosts=_lines(self._trusted_hosts.text()),
+                confirm_before_install=self._confirm_install.isChecked(),
+                confirm_before_uninstall=self._confirm_uninstall.isChecked(),
+                confirm_before_upgrade=self._confirm_upgrade.isChecked(),
+                show_sizes_by_default=self._show_sizes.isChecked(),
+                show_outdated_by_default=self._show_outdated.isChecked(),
+            )
+        )
+
+    # -- change handlers --------------------------------------------------------
+
+    def _on_theme_changed(self, _index: int) -> None:
+        """The user picked a theme; validate and push it back through the shell."""
+        self.apply_current_settings()
+
+    def _on_language_changed(self, _index: int) -> None:
+        """The user picked a language; validate and push it back through the shell."""
+        self.apply_current_settings()
+
+    def apply_current_settings(self) -> None:
+        """Validate the controls' current values and persist them."""
+        if self._loading:
+            return
+        settings = self.current_settings()
+        self._shell.apply_settings(settings)
+        # The shell re-translates and re-themes the window, which reads the
+        # controls back in the new language, so this write does not fight it.
+        self._shell.save()
+        self.load_settings(settings)
+
+    # -- re-translation ---------------------------------------------------------
+
+    def retranslate(self) -> None:
+        """Re-render every string the page owns in the current language."""
+        for key, box in self._groups.items():
+            box.setTitle(self._shell.text(key))
+        for key, label in self._labels.items():
+            label.setText(self._shell.text(key))
+
+        self._page_size.setSuffix(
+            " " + self._shell.text(TranslationKey.SETTINGS_PACKAGES_PER_PAGE_UNITS)
+        )
+
+        for edit in self._line_edits:
+            edit.setPlaceholderText(self._shell.text(TranslationKey.SETTINGS_LINES_HINT))
+
+        for index, theme_member in enumerate(ColorTheme):
+            self._theme_combo.setItemText(index, self._theme_label(theme_member))
+        for index, language_member in enumerate(Language):
+            self._language_combo.setItemText(index, self._language_label(language_member))
+
+
+def _lines(text: str) -> tuple[str, ...]:
+    """Split a multi-line field into the non-empty, stripped entries."""
+    return tuple(line.strip() for line in text.splitlines() if line.strip())

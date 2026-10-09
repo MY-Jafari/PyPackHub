@@ -106,10 +106,10 @@ one audited module instead of emitting a warning about it everywhere. B602
 | --- | --- | --- |
 | 0 | Scaffold: `pyproject.toml`, `src/` layout, lock files, bundled fonts, docs, CI and security workflows | Editable install works, every check passes |
 | 1 | ✅ Security core: `runner`, `validation`, `platform_guard`, `secrets`/redaction, `net`, the security test-suite, the project's banned-pattern scanner | The Phase 1 subset of section 11.9 passes - see the note below |
-| 2 | Core: settings, logging, environment detection and system info, installed-package listing, sizes, PyPI client, task queue, `pip` and `uv` backends | Unit tests with mocked subprocess output, plus a real run against this machine |
+| 2 | ✅ Core: settings, logging, environment detection and system info, installed-package listing, sizes, PyPI client, task queue, `pip` and `uv` backends | Unit tests with mocked subprocess output, plus a real run against this machine |
 | 3 | ✅ UI foundation: design tokens and QSS themes, i18n and RTL direction management, window shell, settings persistence, console entry point | Offscreen smoke test, live theme and language switching |
-| 4 | Packages view: table, search/filter/sort, detail panel, confirmation dialog, live terminal with cancel, install/uninstall/upgrade/downgrade/upgrade-all | Offscreen smoke test plus a manual run |
-| 5 | Settings page, the PEP 668 "create a virtual environment" flow, workflow finalisation, README completion | The Phase 1 acceptance checklist from SPEC section 13 |
+| 4 | ✅ Packages view: table, search/filter/sort, detail panel, confirmation dialog, live terminal with cancel, install/uninstall/upgrade/downgrade/upgrade-all | Offscreen smoke test plus a manual run |
+| 5 | ✅ Settings page, the PEP 668 "create a virtual environment" flow, workflow finalisation, README completion | The Phase 1 acceptance checklist from SPEC section 13 |
 
 Phases 2 to 4 are split the same way once Phase 1 is done and reviewed.
 
@@ -155,10 +155,12 @@ translation table would otherwise show a half-translated window.
 is switched with the layout direction instead of relying on glyph fallback, so
 mixed Persian/English text picks the right face deliberately.
 
-**One bandit `# nosec`.** Bandit's B604 heuristic flags any call with a keyword
-argument named `shell=`; `MainWindow(shell=...)` is PyPackHub's window-shell
-object, not a command shell. The suppression is on that single line, with the
-reason, rather than disabling the check for the file.
+**Three bandit `# nosec` lines, all B604.** Bandit's B604 heuristic flags any call
+with a keyword argument named `shell=`; `MainWindow(shell=...)`,
+`PackagesView(shell=...)` and `SettingsView(shell=...)` all pass PyPackHub's own
+window-shell object, not a command shell. Each suppression is on the single
+offending line with the reason, rather than disabling the check for the file or
+for the project.
 
 **Three latent defects were found while building this section and fixed in the
 same pass**, because a section gate is "every check passes" and none of them was
@@ -169,3 +171,58 @@ arguments it does not accept (the first settings write would have crashed),
 and `backends/pip.py`/`uv.py` swallowed every exception while looking for their
 executable. `pypi.py` also now implements the context-manager protocol it was
 already being used with by `pypi_info()`.
+
+## Notes on section 5
+
+**The settings page writes through the shell, not through the store.** The page
+never touches `QSettingsStore` and never calls `apply_theme()` or the translator:
+it builds an `AppSettings`, hands it to `WindowShell.apply_settings()`, and the
+shell is what validates it, saves it, re-themes the application and re-translates
+the window. One write path means a settings change cannot half-apply, and the page
+stays ignorant of every other part of the window.
+
+**Populating a form must not look like editing it.** `load_settings()` sets the
+combo indices, and a `QComboBox.setCurrentIndex()` on a changed index emits
+`currentIndexChanged` - so the first build of the window ran the change handler
+while the fields further down the form were still empty, and the validator refused
+the (temporarily) empty PyPI index. The page now sets a `_loading` guard around the
+population and the handler returns early while it is set. The existing
+"second window restores the stored theme" test caught this, which is the argument
+for keeping a test that builds a real window twice.
+
+**The way out of a PEP 668 refusal is a virtual environment, not an override.**
+The `BlockedDialog` never offers `--break-system-packages`; when the refusal is
+one a virtual environment would actually solve - `would_need_installer_override`,
+i.e. an externally-managed interpreter - it adds a *Create a virtual environment*
+button, and that is the only refusal that gets one. An App Execution Alias stub is
+a dead end because there is no interpreter behind it to build an environment with,
+and inventing a second button for it would only invite the user to think the
+refusal was negotiable.
+
+**Creating an environment runs on the task queue, and switches the window to
+it.** `venv` is a real child process, so it goes through the runner on a worker
+thread like every other long job: progress streams into the log panel, the shared
+Cancel button stops it (the process tree, not just the process), and on success
+the new prefix becomes the window's environment and the table refreshes. Blocking
+the window behind a modal until `venv` finished would have been the easy version
+of this and the wrong one.
+
+**`register_view` removes the placeholder it replaces.** Section 4's
+`show_view()` preferred the registered view, so nothing *looked* wrong while the
+orphan placeholder stayed in the `QStackedWidget` - but the destination then had
+two pages, and the re-translation pass walked a page the user could never reach.
+The stack-count test was written against the old count and has been rewritten to
+assert one page per page-kind destination and no orphan placeholders, which is
+what it was always meant to check.
+
+**The section-5 "minimal build job" is a real packaging gate.** CI builds the
+sdist and the wheel, installs the wheel with `--no-deps`, asserts the
+`pypackhub = pypackhub.ui.app:run` console script is declared, asserts the bundled
+font files actually shipped (the Persian UI is set in Vazirmatn and the Latin UI in
+Inter; neither is assumed to be installed), and rebuilds a wheel *from the sdist*
+to prove the sdist is complete. Full release and signing stay in Phase 4, as the
+CI strategy table says.
+
+**Three of the ten destinations are real now.** Packages and Settings are
+registered views; Logs reveals the shared log panel. The other seven are still
+disabled placeholders naming their phase, and the README says so.

@@ -25,6 +25,7 @@ from pypackhub.ui.theme import ThemeName
 from pypackhub.ui.views import ViewName
 from pypackhub.ui.views.main_window import (
     NAVIGATION,
+    EntryKind,
     MainWindow,
     PlaceholderView,
 )
@@ -75,9 +76,26 @@ def test_window_builds_with_a_title_and_a_sidebar(window: MainWindow) -> None:
 
 
 def test_the_content_stack_has_one_page_per_destination(window: MainWindow) -> None:
+    """Exactly one page per page-kind destination - and no orphans.
+
+    "Logs" is an ``EntryKind.LOG_PANEL`` destination: it reveals the shared log
+    panel rather than owning a page, so it contributes no page to the stack. A
+    destination whose real view is registered must not keep its placeholder
+    behind as a second, unreachable page.
+    """
     stack = window.centralWidget().findChild(QStackedWidget)
     assert stack is not None
-    assert stack.count() == len(NAVIGATION)
+    page_entries = [entry for entry in NAVIGATION if entry.kind is EntryKind.PAGE]
+    assert stack.count() == len(page_entries)
+
+    placeholders = [
+        stack.widget(index)
+        for index in range(stack.count())
+        if isinstance(stack.widget(index), PlaceholderView)
+    ]
+    assert len(placeholders) == len(page_entries) - len(
+        [entry for entry in page_entries if entry.available]
+    )
 
 
 def test_unbuilt_destinations_are_disabled_and_explain_themselves(
@@ -91,7 +109,7 @@ def test_unbuilt_destinations_are_disabled_and_explain_themselves(
 
 
 def test_switching_to_an_unbuilt_destination_changes_nothing(window: MainWindow) -> None:
-    window.show_view(ViewName.SETTINGS)
+    window.show_view(ViewName.ENVIRONMENTS)
     assert window.current_view is ViewName.DASHBOARD
 
 

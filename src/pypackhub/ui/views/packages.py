@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from pypackhub.core.backends.base import ActionKind, BackendError, CommandPlan, PackageAction
+from pypackhub.core.environments import create_environment
 from pypackhub.core.inventory import Inventory, InventoryService, PackageRow
 from pypackhub.core.metadata import InstalledMetadataIndex
 from pypackhub.core.platform_guard import ModificationPolicy, Severity
@@ -58,6 +59,8 @@ from pypackhub.ui.widgets.detail_panel import DetailPanel
 from pypackhub.ui.widgets.dialogs import (
     BlockedDialog,
     ConfirmationDialog,
+    CreateEnvironmentDialog,
+    CreateEnvironmentRequest,
     DowngradeDialog,
     InstallDialog,
 )
@@ -91,6 +94,7 @@ class PackagesView(QWidget):
     row_updated = Signal(object)
     refresh_finished = Signal(object)
     run_finished = Signal(object)
+    create_finished = Signal(object)
     run_line = Signal(str)
     status_changed = Signal(str)
     toast = Signal(str, object)
@@ -115,6 +119,7 @@ class PackagesView(QWidget):
         self._cancel: threading.Event | None = None
         self._refresh_task: str = ""
         self._run_task: str = ""
+        self._create_task: str = ""
 
         self._build_ui()
         self._connect()
@@ -252,6 +257,7 @@ class PackagesView(QWidget):
         self.row_updated.connect(self._on_row_updated)
         self.refresh_finished.connect(self._on_refresh_finished)
         self.run_finished.connect(self._on_run_finished)
+        self.create_finished.connect(self._on_create_finished)
         self.run_line.connect(self._log.append_line)
 
     # -- state ---------------------------------------------------------
@@ -428,9 +434,97 @@ class PackagesView(QWidget):
         if self._run_task:
             self._context.tasks.cancel(self._run_task)
             self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_CANCELLED))
+        elif self._create_task:
+            self._context.tasks.cancel(self._create_task)
+            self.status_changed.emit(self._shell.text(TranslationKey.CREATE_ENV_CANCELLED))
         elif self._refresh_task:
             self._context.tasks.cancel(self._refresh_task)
             self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_CANCELLED))
+
+    def create_environment_requested(self) -> bool:
+        """Ask where to build a virtual environment, then build it.
+
+        This is the way out of a PEP 668 refusal: the user gets a private
+        package folder instead of ``--break-system-packages``. Returns True when
+        a creation was scheduled.
+        """
+        if self._create_task:
+            return False
+
+        dialog = CreateEnvironmentDialog(
+            translator=self._shell.translator,
+            default_location=str(Path.cwd() / ".venv"),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        self._run_create(dialog.value())
+        return True
+
+    def _run_create(self, request: CreateEnvironmentRequest) -> None:
+        """Create the environment on a worker thread, streaming into the log."""
+        label = self._shell.text(TranslationKey.CREATE_ENV_TITLE)
+        self._log.begin_run(label)
+        self._log.append_line(self._shell.text(TranslationKey.CREATE_ENV_RUNNING))
+
+        def work(_task_id: str, _progress: object, cancel: threading.Event) -> object:
+            return create_environment(
+                Path(request.location).expanduser(),
+                interpreter=Path(request.interpreter) if request.interpreter else None,
+                cancel=cancel,
+                on_progress=self.run_line.emit,
+            )
+
+        self._create_task = self._context.tasks.schedule(
+            label,
+            work,
+            on_finish=lambda _task_id, result: self.create_finished.emit(result),
+        )
+
+    def _on_create_finished(self, result: TaskResult) -> None:
+        from pypackhub.core.environments import CreateEnvironmentResult
+
+        self._create_task = ""
+        created = result.payload if isinstance(result.payload, CreateEnvironmentResult) else None
+
+        if created is None:
+            message = result.error or self._shell.text(TranslationKey.TOAST_FAILED)
+            self._log.end_run(RunOutcome.FAILED, error=message)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return
+
+        if created.success:
+            message = self._shell.text(
+                TranslationKey.CREATE_ENV_CREATED, prefix=str(created.prefix)
+            )
+            self._log.end_run(RunOutcome.DONE)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.SUCCESS)
+            # The new environment is immediately usable, so the window switches
+            # to it rather than making the user find it in the switcher.
+            self._context.set_default_environment(created.prefix)
+            self._environment = Path(created.prefix)
+            self._service = None
+            self.refresh()
+            return
+
+        cancelled = created.result.cancelled
+        message = (
+            self._shell.text(TranslationKey.CREATE_ENV_CANCELLED)
+            if cancelled
+            else self._shell.text(TranslationKey.CREATE_ENV_FAILED, error=created.message)
+        )
+        self._log.end_run(
+            RunOutcome.CANCELLED if cancelled else RunOutcome.FAILED,
+            error="" if cancelled else created.message,
+        )
+        self.status_changed.emit(message)
+        self.toast.emit(
+            message,
+            ToastKind.INFO if cancelled else ToastKind.ERROR,
+        )
 
     def confirm_and_run(self, action: PackageAction) -> bool:
         """The one path that changes an environment.
@@ -449,7 +543,19 @@ class PackagesView(QWidget):
 
         policy = service.policy()
         if _is_blocked(policy):
-            BlockedDialog(policy=policy, translator=self._shell.translator, parent=self).exec()
+            # When the refusal is the kind the user can escape - a system or
+            # PEP 668 interpreter that only accepts packages in a virtual
+            # environment - the dialog carries the way out. Any other refusal
+            # stays a plain explanation with no button to click through.
+            blocked = BlockedDialog(
+                policy=policy,
+                translator=self._shell.translator,
+                offer_create_environment=_offers_create_environment(policy),
+                parent=self,
+            )
+            blocked.exec()
+            if blocked.wants_create_environment:
+                self.create_environment_requested()
             return False
 
         try:
@@ -666,6 +772,17 @@ class PackagesView(QWidget):
         if self.proxy.rowCount() == 0:
             return
         self.table.selectRow(0)
+
+
+def _offers_create_environment(policy: ModificationPolicy) -> bool:
+    """Whether a refusal is one a virtual environment would actually solve.
+
+    That is the externally-managed / system-interpreter case: the interpreter
+    will happily install into a virtual environment, so offering to create one is
+    a real answer rather than a distraction. An App Execution Alias stub is not,
+    because there is no interpreter behind it to build an environment with.
+    """
+    return policy.would_need_installer_override
 
 
 def _is_blocked(policy: ModificationPolicy) -> bool:

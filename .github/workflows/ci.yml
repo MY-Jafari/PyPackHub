@@ -116,3 +116,66 @@ jobs:
 
       - name: Fail when the committed locks are stale
         run: git diff --exit-code -- requirements.lock requirements-dev.lock
+
+  # Section 5's "minimal build job": the sdist and wheel both build, the wheel
+  # installs into an empty environment, the console entry point is really
+  # declared, and the bundled fonts and icon data actually shipped. Packaging
+  # mistakes are silent until a user hits them, so they are caught here.
+  build:
+    name: Build the distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the build frontend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build the sdist and the wheel
+        run: python -m build
+
+      - name: Install the wheel without its dependencies
+        run: python -m pip install --no-deps --force-reinstall dist/*.whl
+
+      - name: The console entry point is declared
+        run: |
+          python - <<'PY'
+          from importlib.metadata import entry_points
+
+          scripts = {
+              point.name: point.value
+              for point in entry_points(group="console_scripts")
+          }
+          assert scripts.get("pypackhub") == "pypackhub.ui.app:run", scripts
+          print("console script:", scripts["pypackhub"])
+          PY
+
+      - name: The bundled data files shipped
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pypackhub
+
+          package = Path(pypackhub.__file__).parent
+          fonts = sorted(
+              path
+              for path in (package / "assets").rglob("*")
+              if path.suffix.lower() in {".ttf", ".otf", ".woff2"}
+          )
+          # The window is unusable without the bundled faces: the Persian UI is
+          # set in Vazirmatn and the Latin UI in Inter, and neither is assumed to
+          # be installed on the machine.
+          assert fonts, "no bundled font files shipped in the wheel"
+          print("bundled font files:", len(fonts))
+          PY
+
+      - name: The distributions build from the sdist too
+        run: python -m build --wheel --outdir /tmp/rebuilt dist/*.tar.gz

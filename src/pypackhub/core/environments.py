@@ -14,7 +14,10 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 import time
+import typing
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -25,11 +28,15 @@ from pypackhub.core.platform_guard import (
     InterpreterFacts,
     inspect,
 )
+from pypackhub.core.runner import CommandResult, run
 
 __all__ = [
+    "CreateEnvironmentError",
+    "CreateEnvironmentResult",
     "EnvironmentListing",
     "EnvironmentSource",
     "SystemInfo",
+    "create_environment",
     "detected_environments",
     "system_info",
 ]
@@ -111,6 +118,138 @@ def system_info() -> SystemInfo:
         executable=Path(sys.executable).resolve(),
         default_encoding=(sys.getdefaultencoding() or "utf-8"),
         locale=(os.environ.get("LANG") or os.environ.get("LC_ALL") or ""),
+    )
+
+
+#: A label the created-environment dialog shows while the job is running.
+_CREATE_ENV_TEMPLATE = (
+    "creating virtual environment\u2026",
+    "creating virtual environment\u2026",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CreateEnvironmentResult:
+    """What :func:`create_environment` reports after a creation attempt.
+
+    The result is always returned, never raised: a cancelled or failed creation
+    still gives the UI enough information to explain what happened.
+    """
+
+    prefix: Path
+    requested_location: Path
+    interpreter: Path | None
+    success: bool
+    result: CommandResult
+    message: str
+
+
+class CreateEnvironmentError(RuntimeError):
+    """Base class for creation failures that are not a process error."""
+
+
+def create_environment(
+    location: Path,
+    *,
+    interpreter: Path | None = None,
+    cancel: object | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> CreateEnvironmentResult:
+    """Create a virtual environment at *location* using the requested interpreter.
+
+    The environment is created with ``python -m venv --clear`` so a re-run over
+    an existing folder either replaces it or fails loudly rather than layering
+    state on state. The child is spawned through the hardened runner so it gets
+    a sanitized environment, an isolated process group, and a timeout.
+
+    *location* is normalized and resolved before anything is touched, and the
+    parent must exist - the caller is responsible for pointing at a sensible
+    folder (the settings dialog suggests ``.venv`` next to a project).
+
+    When *interpreter* is ``None`` the running interpreter is used. When it is
+    given it must be an absolute path or a name that resolves through the
+    hardened search path (a relative path is refused).
+    """
+    if on_progress is not None:
+        on_progress(_CREATE_ENV_TEMPLATE[0])
+
+    resolved_location = Path(location).expanduser().resolve()
+
+    if not resolved_location.parent.is_dir():
+        raise CreateEnvironmentError(f"parent of {resolved_location!s} does not exist")
+
+    if interpreter is None:
+        selected_interpreter = Path(sys.executable).resolve()
+    else:
+        # The absoluteness check has to happen on what the caller gave us, before
+        # ``resolve()`` turns any path into an absolute one - otherwise a relative
+        # path would be resolved against the current working directory, which is
+        # exactly the accidental choice this refuses.
+        candidate = Path(interpreter).expanduser()
+        if not candidate.is_absolute():
+            raise CreateEnvironmentError(f"interpreter path must be absolute: {interpreter!s}")
+        selected_interpreter = candidate.resolve()
+
+    # ``venv`` is part of the standard library, so the module is always present
+    # on a CPython installation. Using ``-m venv`` rather than the ``venv``
+    # script means the environment is always created by the interpreter the user
+    # asked for, including inside a conda or pyenv environment.
+    argv = (
+        str(selected_interpreter),
+        "-m",
+        "venv",
+        "--clear",
+        str(resolved_location),
+    )
+
+    # The runner accepts a ``threading.Event`` directly; if the caller
+    # passes a cancel token that is one, forward it so creation can be
+    # cancelled the same way every other long job in the application is.
+    cancel_event: threading.Event | None = None
+    if cancel is not None and hasattr(cancel, "is_set"):
+        try:
+            cancel_event = typing.cast(threading.Event, cancel)
+        except Exception:  # pragma: no cover - defensive
+            cancel_event = None
+
+    result = run(
+        argv,
+        timeout=600.0,
+        cwd=resolved_location.parent,
+        cancel=cancel_event,
+        on_stdout=(on_progress or (lambda line: None)),
+        on_stderr=(on_progress or (lambda line: None)),
+        check=False,
+    )
+
+    if result.ok:
+        message = f"Virtual environment created at {resolved_location!s}."
+        if on_progress is not None:
+            on_progress(message)
+        return CreateEnvironmentResult(
+            prefix=resolved_location,
+            requested_location=location,
+            interpreter=selected_interpreter,
+            success=True,
+            result=result,
+            message=message,
+        )
+
+    reason = (
+        "creation failed"
+        if result.returncode != 0
+        else ("creation timed out" if result.timed_out else "creation was cancelled")
+    )
+    message = f"{reason}: {result.display_command()}"
+    if on_progress is not None:
+        on_progress(message)
+    return CreateEnvironmentResult(
+        prefix=resolved_location,
+        requested_location=location,
+        interpreter=selected_interpreter,
+        success=False,
+        result=result,
+        message=message,
     )
 
 

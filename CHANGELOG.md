@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The packages view and the settings page (sections 4 and 5), which together make
+  the Phase 1 window usable end to end:
+  - The package table (`ui/views/packages.py`): installed packages with their
+    status and version, search, an outdated filter, sortable columns, progressive
+    refresh, the sizes toggle, and a detail panel showing description, links,
+    license, author, location and the dependency relationships of the selected
+    package. Package metadata is rendered as plain text; a URL becomes an action
+    only on click, and only over HTTPS.
+  - The five changing actions - install, uninstall, upgrade, downgrade, upgrade
+    all - all go through one path that builds the plan, asks the platform guard
+    whether the environment may be changed, shows the plan's own command text in a
+    confirmation dialog, and only then runs the *same* plan on a worker thread.
+  - A live log panel that streams a running command's output and cancels the
+    process tree, not just the process.
+  - The settings page (`ui/views/settings.py`): theme, language, table page size,
+    sidebar width, PyPI index, extra indexes, trusted hosts, and which actions ask
+    for confirmation. Values are validated as they change, written through the
+    window shell (one place validates, saves, re-themes and re-translates), and
+    the whole page re-renders on a language switch, including the RTL flip.
+  - The PEP 668 "create a virtual environment" flow: a refusal on an
+    externally-managed interpreter now offers the way out instead of only
+    explaining itself. Creation goes through the hardened runner on the task
+    queue with streamed progress, cancellation, and a switch to the new
+    environment when it succeeds (`core/environments.py`, `ui/widgets/dialogs.py`).
+  - CI now builds the sdist and the wheel, installs the wheel without its
+    dependencies, checks the console entry point is declared, checks the bundled
+    fonts shipped, and rebuilds a wheel from the sdist to prove the sdist is
+    complete.
 - The UI foundation (section 3): a dark and a light theme built from one set of
   design tokens, English and Persian with a full right-to-left flip, and the
   window they are rendered in.
@@ -83,6 +111,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Registering a real view over a destination left its placeholder page in the
+  content stack, so the destination had two pages and the re-translation pass
+  walked a page the user could never reach. `register_view()` now removes the
+  placeholder, and the stack test asserts one page per page-kind destination with
+  no orphans.
+- The settings page applied settings while it was still loading them: populating a
+  combo box emits its change signal, so the change handler validated a form whose
+  other fields were still empty (and the empty PyPI index was refused). Loading is
+  now guarded, so showing the stored settings does not look like editing them.
 - `settings_data_directory()` and `ensure_log_directory()` called
   `platformdirs.user_data_dir()` with keyword arguments it does not accept, so the
   first settings or log write would have raised `TypeError`. Both directories are

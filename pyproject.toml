@@ -64,6 +64,7 @@ pypackhub = "pypackhub.ui.app:run"
 dev = [
   "bandit>=1.7.9",
   "black>=24.4",
+  "build>=1.2",
   "mypy>=1.11",
   "pip-audit>=2.7",
   "pytest>=8.2",
