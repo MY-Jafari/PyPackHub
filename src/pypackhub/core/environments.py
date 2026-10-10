@@ -122,10 +122,7 @@ def system_info() -> SystemInfo:
 
 
 #: A label the created-environment dialog shows while the job is running.
-_CREATE_ENV_TEMPLATE = (
-    "creating virtual environment\u2026",
-    "creating virtual environment\u2026",
-)
+_CREATE_ENV_PROGRESS = "creating virtual environment\u2026"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +168,7 @@ def create_environment(
     hardened search path (a relative path is refused).
     """
     if on_progress is not None:
-        on_progress(_CREATE_ENV_TEMPLATE[0])
+        on_progress(_CREATE_ENV_PROGRESS)
 
     resolved_location = Path(location).expanduser().resolve()
 
@@ -235,11 +232,15 @@ def create_environment(
             message=message,
         )
 
-    reason = (
-        "creation failed"
-        if result.returncode != 0
-        else ("creation timed out" if result.timed_out else "creation was cancelled")
-    )
+    # A cancelled run usually exits non-zero, so the cancel/timeout checks have to
+    # come first: testing the exit code first would report every cancellation as a
+    # plain failure.
+    if result.cancelled:
+        reason = "creation was cancelled"
+    elif result.timed_out:
+        reason = "creation timed out"
+    else:
+        reason = "creation failed"
     message = f"{reason}: {result.display_command()}"
     if on_progress is not None:
         on_progress(message)

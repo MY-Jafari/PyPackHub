@@ -42,21 +42,6 @@ class PackageSize:
         return f"{value:.1f} {unit}"
 
 
-def _iter_files_under(prefix: Path) -> Collection[Path]:
-    """Enumerate the files under *prefix*, stopping at the top level of folders.
-
-    For site-packages we intentionally keep the counting shallow: a package may
-    own a folder with thousands of files, and walking everything every time
-    would make size lookups expensive. The section 2 skeleton keeps this simple;
-    a real implementation can swap this for a cached manifest or a deeper walk
-    when it matters.
-    """
-    try:
-        return sorted(prefix.rglob("*"), key=lambda path: path)
-    except (OSError, ValueError):
-        return []
-
-
 def _top_paths(paths: Collection[Path], top: int = 5) -> tuple[tuple[str, int], ...]:
     by_dir: dict[str, int] = {}
     for path in paths:

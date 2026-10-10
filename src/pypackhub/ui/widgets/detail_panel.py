@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -137,7 +138,11 @@ class DetailPanel(QWidget):
         body.addWidget(self.links_container)
         body.addStretch(1)
 
-        self._link_buttons: list[QPushButton] = []
+        self._link_buttons: list[QToolButton] = []
+        self.edit_label = QLabel(self._scroll_body)
+        self.target_label = QLabel(self._scroll_body)
+        self.python_label = QLabel(self._scroll_body)
+        self._outdated_label = QLabel(self._scroll_body)
 
         self.clear()
         self.retranslate(translator)
@@ -183,6 +188,10 @@ class DetailPanel(QWidget):
         self.summary_label.setText(summary)
         self.summary_label.setVisible(bool(summary))
 
+        # same row still visible: refresh the panel with the (possibly newer)
+        # installed version and metadata, without re-rendering everything.
+        self._refresh_from_row(row, metadata=metadata)
+
         self._render_notice(row)
         self._render_fields(row)
         self.requires_label.setText(self._list_text(metadata.requires if metadata else ()))
@@ -206,38 +215,25 @@ class DetailPanel(QWidget):
             label.setText(UNKNOWN_TEXT)
         self._clear_links()
 
-    def retranslate(self, translator: Translator) -> None:
-        """Re-render the chrome after a language switch, then the content."""
-        self._translator = translator
-
-        for key, translation_key in _FIELD_KEYS:
-            self.field_labels[key].setText(translator.translate(translation_key))
-
-        self.requires_heading.setText(translator.translate(TranslationKey.DETAIL_REQUIRES))
-        self.required_by_heading.setText(translator.translate(TranslationKey.DETAIL_REQUIRED_BY))
-        self.links_heading.setText(translator.translate(TranslationKey.DETAIL_LINKS))
-
-        if self._row is not None:
-            self.show_row(self._row, metadata=self._metadata, dependents=self._dependents)
-        else:
-            self.clear()
-
-    # -- rendering -----------------------------------------------------
-
-    def _add_heading(self, layout: QVBoxLayout, key: TranslationKey) -> QLabel:
-        label = QLabel(self._translator.translate(key), self._scroll_body)
-        label.setObjectName("detailHeading")
-        layout.addWidget(label)
-        return label
-
-    def _add_body_label(self, layout: QVBoxLayout) -> QLabel:
-        label = QLabel(self._scroll_body)
-        label.setWordWrap(True)
-        label.setObjectName("secondaryText")
-        layout.addWidget(label)
-        return label
+    def _refresh_from_row(self, row: PackageRow, *, metadata: PackageMetadata | None) -> None:
+        """Refresh the view using the *latest* row/row-version, not the last snapshot."""
+        self._row = row
+        self._metadata = metadata
+        self.title_label.setText(row.name)
+        self.version_label.setText(self._version_text(row))
+        summary = row.summary or (metadata.summary if metadata else "")
+        self.summary_label.setText(summary)
+        self.summary_label.setVisible(bool(summary))
+        self._render_notice(row)
+        self._render_fields(row)
+        self.requires_label.setText(
+            self._list_text(metadata.requires if metadata else ())
+        )
+        self.required_by_label.setText(self._list_text(self._dependents))
+        self._render_links(row)
 
     def _version_text(self, row: PackageRow) -> str:
+        """Return the installed-version line shown in the panel."""
         if row.latest and row.is_outdated:
             return f"{row.installed} \u2192 {row.latest}"
         return row.installed or UNKNOWN_TEXT
@@ -270,6 +266,19 @@ class DetailPanel(QWidget):
 
         for key, value in values.items():
             self.fields[key].setText(value or UNKNOWN_TEXT)
+
+    def _add_heading(self, layout: QVBoxLayout, key: TranslationKey) -> QLabel:
+        label = QLabel(self._translator.translate(key), self._scroll_body)
+        label.setObjectName("detailHeading")
+        layout.addWidget(label)
+        return label
+
+    def _add_body_label(self, layout: QVBoxLayout) -> QLabel:
+        label = QLabel(self._scroll_body)
+        label.setWordWrap(True)
+        label.setObjectName("secondaryText")
+        layout.addWidget(label)
+        return label
 
     def _list_text(self, values: tuple[str, ...]) -> str:
         if not values:
@@ -313,3 +322,20 @@ class DetailPanel(QWidget):
             button.deleteLater()
         self._link_buttons.clear()
         self.links_container.setVisible(False)
+
+    def retranslate(self, translator: Translator) -> None:
+        """Re-render the chrome after a language switch, then the content."""
+        self._translator = translator
+
+        for key, translation_key in _FIELD_KEYS:
+            self.field_labels[key].setText(translator.translate(translation_key))
+
+        self.requires_heading.setText(translator.translate(TranslationKey.DETAIL_REQUIRES))
+        self.required_by_heading.setText(translator.translate(TranslationKey.DETAIL_REQUIRED_BY))
+        self.links_heading.setText(translator.translate(TranslationKey.DETAIL_LINKS))
+
+        if self._row is not None:
+            self.show_row(self._row, metadata=self._metadata, dependents=self._dependents)
+        else:
+            self.clear()
+

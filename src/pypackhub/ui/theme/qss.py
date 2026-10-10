@@ -20,6 +20,7 @@ from typing import Final
 
 from pypackhub.ui.theme.design_tokens import (
     BODY_FONT_SIZE_PX,
+    FONT_FAMILIES,
     MONOSPACE_FONT_FAMILY,
     TABLE_FONT_SIZE_PX,
     TITLE_FONT_SIZE_PX,
@@ -80,7 +81,7 @@ def _sections(tokens: DesignTokens, *, rtl: bool) -> list[str]:
 
 
 def _base(tokens: DesignTokens) -> str:
-    families = ", ".join(f'"{family}"' for family in ("Inter", "Vazirmatn"))
+    families = ", ".join(f'"{family}"' for family in FONT_FAMILIES)
     return f"""\
 QWidget {{
     background-color: transparent;
@@ -210,7 +211,12 @@ def _labels(tokens: DesignTokens) -> str:
 }}
 
 #errorText {{
-    color: {tokens.danger};
+    color: {tokens.text_on_accent};
+    background-color: {tokens.danger};
+    border: 1px solid {tokens.danger};
+    border-radius: {tokens.radius_sm};
+    padding: 8px 10px;
+    font-weight: 500;
 }}
 
 #safetyNotice {{
@@ -401,6 +407,10 @@ def _log_console(tokens: DesignTokens) -> str:
 #versionLabel, #commandPreview {{
     font-family: "{MONOSPACE_FONT_FAMILY}", monospace;
     font-size: {TABLE_FONT_SIZE_PX}px;
+    background-color: {tokens.background};
+    border: 1px solid {tokens.border};
+    border-radius: {tokens.radius_sm};
+    padding: 8px 10px;
 }}
 
 #logHeader {{

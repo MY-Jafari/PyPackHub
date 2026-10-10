@@ -79,6 +79,7 @@ class AppSettings:
     confirm_before_install: bool = True
     confirm_before_uninstall: bool = True
     confirm_before_upgrade: bool = True
+    package_manager: str = "auto"
 
 
 def default_settings() -> AppSettings:
@@ -109,12 +110,19 @@ def validate_settings(settings: AppSettings) -> AppSettings:
         confirm_before_install=bool(settings.confirm_before_install),
         confirm_before_uninstall=bool(settings.confirm_before_uninstall),
         confirm_before_upgrade=bool(settings.confirm_before_upgrade),
+        package_manager=_as_package_manager(settings.package_manager),
     )
 
     if validated.default_target_environment:
         validate_environment_name(validated.default_target_environment)
 
     return validated
+
+
+def _as_package_manager(value: object) -> str:
+    if isinstance(value, str) and value in {"auto", "pip", "uv"}:
+        return value
+    return "auto"
 
 
 def settings_data_directory() -> Path:

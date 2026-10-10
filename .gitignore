@@ -184,3 +184,49 @@ cython_debug/
 
 # Throwaway environment used to check that the core really runs without Qt
 .testenv/
+
+# ---------------------------------------------------------------------------
+# Operating-system and editor noise
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd/
+Thumbs.db
+ehthumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+*.orig
+*.rej
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------------------
+# AI / agent tooling state (local to a checkout, never part of the project)
+# ---------------------------------------------------------------------------
+.freebuff/
+.codebuff/
+.cursor/
+.aider*
+.continue/
+.claude/
+.windsurf/
+.agent/
+
+# ---------------------------------------------------------------------------
+# Runtime data and databases (cache, logs, snapshots) must never be committed
+# ---------------------------------------------------------------------------
+data/
+*.sqlite3
+*.sqlite3-journal
+*.db
+*.log.*
+
+# ---------------------------------------------------------------------------
+# Local virtual environments other than .venv
+# ---------------------------------------------------------------------------
+.venv*/

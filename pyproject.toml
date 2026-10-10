@@ -72,6 +72,12 @@ dev = [
   "pytest-qt>=4.4",
   "ruff>=0.6",
 ]
+# Everything the stand-alone desktop installers need. Kept out of the runtime
+# dependencies on purpose: a normal `pip install pypackhub` must not pull a
+# bundler, and the release workflow installs this extra only.
+packaging = [
+  "pyinstaller>=6.10",
+]
 
 [project.urls]
 Homepage = "https://github.com/MY-Jafari/PyPackHub"
@@ -89,6 +95,7 @@ include = [
   "/tests",
   "/docs",
   "/scripts",
+  "/packaging",
   "/CHANGELOG.md",
   "/CONTRIBUTING.md",
   "/LICENSE",
@@ -124,6 +131,12 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"] # a test-suite is built out of assert statements
+# The build tooling in packaging/ is not shipped and not imported by the app:
+# it renders icons and launches the frozen bundle to check it starts, which is
+# precisely the subprocess call flake8-bandit warns about. The runtime code this
+# rule protects lives in src/ and is policed by scripts/security_scan.py, which
+# allows the subprocess import in exactly one module.
+"packaging/**" = ["S404", "S603", "S607"]
 # The security tests deliberately contain fake credentials and /tmp paths:
 # that is the input they feed to the redaction and sanitizing code.
 "tests/security/**" = ["S105", "S108"]

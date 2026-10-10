@@ -13,6 +13,8 @@ has to be able to re-render without rebuilding the table.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from enum import Enum
 from typing import Any, Final
 
@@ -61,7 +63,10 @@ SORT_ROLE: Final = int(Qt.ItemDataRole.UserRole) + 1
 #: without re-locating it in the inventory.
 ROW_ROLE: Final = int(Qt.ItemDataRole.UserRole) + 2
 
-#: Role used by the badge delegate to know which pill to paint.
+#: Role carrying the row's :class:`PackageStatus`, so the badge delegate knows
+#: which pill to paint. It holds the status rather than the colour: the delegate
+#: resolves the colour through the tokens, which is what makes a theme switch
+#: repaint every badge.
 STATUS_ROLE: Final = int(Qt.ItemDataRole.UserRole) + 3
 
 #: Role that carries the raw byte count, for a size tooltip.
@@ -111,9 +116,27 @@ _STATUS_RANK: Final[dict[PackageStatus, int]] = {
 }
 
 
-def status_role(status: PackageStatus) -> AccentRole:
-    """The badge colour role for a status."""
-    return _STATUS_ROLES[status]
+def status_role(status: PackageStatus | str) -> AccentRole:
+    """The badge colour role for a status.
+
+    *status* arrives either as the enum member or as its plain string value.
+    A ``str``-based enum does not survive the trip through Qt: a
+    :class:`QSortFilterProxyModel` hands the value back as a ``str``, which is
+    what the delegate sees. Both forms are therefore accepted and normalised
+    through the enum, rather than relying on the fact that a ``str`` member and
+    its value happen to hash alike.
+
+    An unrecognised value degrades to the neutral role instead of raising: this
+    runs inside a paint handler, where an exception prints a traceback and
+    leaves the cell blank rather than doing anything useful.
+    """
+
+    try:
+        canonical = PackageStatus(status)
+    except ValueError:
+        return _STATUS_ROLES[PackageStatus.UNKNOWN]
+
+    return _STATUS_ROLES[canonical]
 
 
 class PackageTableModel(QAbstractTableModel):
@@ -170,7 +193,7 @@ class PackageTableModel(QAbstractTableModel):
         if role == SORT_ROLE:
             return self._sort_value(row, column)
         if role == STATUS_ROLE:
-            return status_role(row.status)
+            return row.status
         if role == SIZE_ROLE:
             return row.size_bytes
         if role == int(Qt.ItemDataRole.ToolTipRole):
@@ -291,8 +314,13 @@ class PackageTableModel(QAbstractTableModel):
             return QColor(self._tokens.text_secondary)
         return None
 
-    def badge_color(self, status: PackageStatus) -> QColor:
-        """The colour the delegate should paint for a status."""
+    def badge_color(self, status: PackageStatus | str) -> QColor:
+        """The colour the delegate should paint for a status.
+
+        The argument is whatever came back from :data:`STATUS_ROLE`, which Qt may
+        have flattened to a string - see :func:`status_role`.
+        """
+
         return QColor(self._tokens.color_for_role(status_role(status)))
 
     @property
@@ -330,16 +358,46 @@ class PackageFilterProxy(QSortFilterProxyModel):
         query = query.strip()
         if query == self._query:
             return
-        self._query = query
-        self.invalidateFilter()
+        with self._filter_change():
+            self._query = query
         self.queryChanged.emit(query)
 
     def set_outdated_only(self, outdated_only: bool) -> None:
         if outdated_only == self._outdated_only:
             return
-        self._outdated_only = outdated_only
-        self.invalidateFilter()
+        with self._filter_change():
+            self._outdated_only = outdated_only
         self.outdatedFilterChanged.emit(outdated_only)
+
+    @contextmanager
+    def _filter_change(self) -> Iterator[None]:
+        """Re-run the filter around a change to its criteria.
+
+        Qt 6.10 replaced ``invalidateFilter()`` - and, in 6.11, its own
+        ``invalidateRowsFilter()`` replacement - with the
+        ``beginFilterChange()`` / ``endFilterChange()`` pair, which reports the
+        rows that appear and disappear instead of making the view rebuild
+        everything. Both are still only warnings, but this project turns a
+        deprecation warning from its own code into a test failure, and the
+        supported range in ``pyproject.toml`` still includes PySide6 6.8, where
+        the pair does not exist yet.
+
+        So the pair is used when it is there and ``invalidateFilter()`` is the
+        fallback. The body of the ``with`` block is where the criteria change:
+        the new API has to bracket the assignment to report it correctly.
+        """
+
+        begin = getattr(self, "beginFilterChange", None)
+        end = getattr(self, "endFilterChange", None)
+
+        if callable(begin) and callable(end):
+            begin()
+            yield
+            end(QSortFilterProxyModel.Direction.Rows)
+            return
+
+        yield
+        self.invalidateFilter()  # pragma: no cover - PySide6 < 6.10 only
 
     def filterAcceptsRow(  # noqa: N802 - Qt override
         self, source_row: int, source_parent: AnyIndex

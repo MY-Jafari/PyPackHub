@@ -355,6 +355,17 @@ class Backend(ABC):
             return tuple(f"{name}=={action.version}" for name in action.names)
         return action.specs
 
+    def download_plan(self, action: PackageAction) -> CommandPlan | None:
+        """A plan that downloads the action's targets (and their dependencies)
+        without installing them, so the subsequent install can run from a cache.
+
+        Return ``None`` when the backend has nothing special to do (for example
+        when the install itself already resolves and downloads in one pass). This is
+        used for upgrade paths where a package manager cannot reliably upgrade
+        itself while it is running: download first, then install from the cache.
+        """
+        return None
+
     def _require(self, action: PackageAction) -> None:
         """Refuse an action this backend cannot perform."""
         if not self.capability.supports(action.kind):

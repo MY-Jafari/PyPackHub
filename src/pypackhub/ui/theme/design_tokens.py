@@ -283,9 +283,10 @@ def default_dark_tokens() -> DesignTokens:
 def default_tokens(variant: ThemeVariant = ThemeVariant.LIGHT) -> DesignTokens:
     """The default token set for a variant, defaulting to light.
 
-    ``ThemeVariant.SYSTEM`` has no colour of its own: it is resolved to a real
-    variant by :mod:`pypackhub.ui.theme.theme_manager` (which asks Qt for the
-    operating system preference) before it ever reaches this function.
+    There is no "system" variant here: :class:`ThemeVariant` only has a concrete
+    light and dark. ``ColorTheme.SYSTEM`` is resolved to one of them by
+    :mod:`pypackhub.ui.theme.theme_manager` (which asks Qt for the operating
+    system preference) before it ever reaches this function.
     """
     return default_dark_tokens() if variant is ThemeVariant.DARK else default_light_tokens()
 

@@ -22,7 +22,7 @@ Three rules are enforced here rather than hoped for:
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -72,6 +72,7 @@ from pypackhub.ui.widgets.package_table import (
     PackageFilterProxy,
     PackageTableModel,
 )
+from pypackhub.ui.widgets.spinner import Spinner, SpinnerSize
 from pypackhub.ui.widgets.toast import ToastKind
 
 __all__ = ["PackagesView", "RefreshOutcome"]
@@ -121,6 +122,9 @@ class PackagesView(QWidget):
         self._run_task: str = ""
         self._create_task: str = ""
 
+        self._spinner = Spinner(size=SpinnerSize.MEDIUM)
+        self._spinner.hide()
+
         self._build_ui()
         self._connect()
 
@@ -160,6 +164,16 @@ class PackagesView(QWidget):
         toolbar.addWidget(self.sizes_check)
 
         toolbar.addStretch(1)
+
+        self._spinner_container = QWidget(self)
+        self._spinner_container.setObjectName("spinnerContainer")
+        spinner_layout = QHBoxLayout(self._spinner_container)
+        spinner_layout.setContentsMargins(0, 0, 0, 0)
+        spinner_layout.setSpacing(0)
+        self._spinner_container.setVisible(False)
+        self._spinner_container.setFixedHeight(28)
+        spinner_layout.addWidget(self._spinner)
+        toolbar.addWidget(self._spinner_container)
 
         self.refresh_button = QPushButton(self)
         self.refresh_button.clicked.connect(self.refresh)
@@ -221,6 +235,7 @@ class PackagesView(QWidget):
         splitter.addWidget(self.detail)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([360, 280])
 
         layout.addWidget(splitter, 1)
 
@@ -344,9 +359,19 @@ class PackagesView(QWidget):
             work,
             on_finish=lambda _task_id, result: self.refresh_finished.emit(result),
         )
+        # Reveal the spinner container as well as the spinner itself: the spinner
+        # lives inside a hidden container, so starting it alone left nothing on
+        # screen while the list loaded.
+        self._spinner_container.setVisible(True)
+        self._spinner.start()
+        self.refresh_button.setEnabled(False)
 
     def _on_refresh_finished(self, result: TaskResult) -> None:
         self._refresh_task = ""
+        self._spinner.stop()
+        self._spinner_container.setVisible(False)
+        self.refresh_button.setEnabled(True)
+
         outcome = result.payload if isinstance(result.payload, RefreshOutcome) else None
 
         if result.state is JobState.FAILED:
@@ -559,13 +584,30 @@ class PackagesView(QWidget):
             return False
 
         try:
+            # If the backend cannot honour the ``--user`` flag the user asked for,
+            # drop it silently rather than surfacing a package-manager error the user
+            # cannot act on. pip honours ``--user``; uv does not.
+            if action.user and not service.backend.capability.can_install_user:
+                action = replace(action, user=False)
+                self.toast.emit(
+                    self._shell.text(TranslationKey.TOAST_CANCELLED),
+                    ToastKind.INFO,
+                )
             plan = service.plan(action)
         except ValidationError as error:
             self._report_validation(error)
             return False
         except BackendError as error:
-            self.status_changed.emit(str(error))
-            self.toast.emit(str(error), ToastKind.ERROR)
+            message = str(error)
+            # Translate common package-manager errors into user-friendly text.
+            lowered = message.lower()
+            if (
+                "uv cannot install into the user site directory" in message
+                or "unrecognized subcommand" in lowered
+            ):
+                message = self._shell.text(TranslationKey.ENV_NO_MANAGER)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
             return False
 
         if policy.requires_confirmation:
@@ -582,7 +624,14 @@ class PackagesView(QWidget):
         return True
 
     def _run_plan(self, plan: CommandPlan) -> None:
-        """Run a confirmed plan on a worker thread, streaming its output."""
+        """Run a confirmed plan on a worker thread, streaming its output.
+
+        For install-style actions the backend may supply a download pre-step that
+        fetches the targets (and their dependencies) first without installing them.
+        That is what lets a package manager be upgraded without trying to replace the
+        process that is currently running it: the new wheels are downloaded first,
+        then the install runs from the cache.
+        """
         if self._run_task:
             return
 
@@ -591,6 +640,16 @@ class PackagesView(QWidget):
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> CommandResult:
             service = self._context.service_for(self._environment)
+            backend = service.backend
+
+            preplan = backend.download_plan(plan.action)
+            if preplan is not None:
+                self.run_line.emit(":: downloading prerequisites ::")
+                self.run_line.emit(f"$ {preplan.display_command()}")
+                pre_result = service.execute(preplan, cancel=cancel, on_line=self.run_line.emit)
+                if not pre_result.ok and not cancel.is_set():
+                    return pre_result
+
             return service.execute(plan, cancel=cancel, on_line=self.run_line.emit)
 
         self._run_task = self._context.tasks.schedule(
@@ -619,16 +678,20 @@ class PackagesView(QWidget):
         self._index = None
         self.refresh()
 
+    # ---- installation / uninstall / upgrade actions --------------------------------
+
     def _change_selected(self, kind: ActionKind) -> None:
         """Run one action for the current selection (or all outdated packages)."""
         rows = self.selected_rows()
 
         if kind is ActionKind.UPGRADE_ALL:
             if self._inventory is None or not self._inventory.outdated_count:
-                self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_NO_SELECTION))
+                self.toast.emit(self._shell.text(TranslationKey.LOG_EMPTY), ToastKind.INFO)
                 return
             self.confirm_and_run(
-                self.service.action_for_upgrade_all(self._inventory, user=self._may_use_user_flag())
+                self.service.action_for_upgrade_all(
+                    self._inventory, user=self._may_use_user_flag()
+                )
             )
             return
 
@@ -649,10 +712,14 @@ class PackagesView(QWidget):
 
         It is not inside an isolated environment: pip refuses a ``--user``
         install there, so offering the checkbox would only produce a confusing
-        failure. Base interpreters are exactly where it matters.
+        failure. Base interpreters are exactly where it matters. It is also only
+        offered when the active backend can actually honour it.
         """
         facts = self.service.facts
-        return not facts.is_isolated
+        if facts.is_isolated:
+            return False
+        backend = self.service.backend
+        return backend.capability.can_install_user
 
     # -- detail panel --------------------------------------------------
 
@@ -674,6 +741,9 @@ class PackagesView(QWidget):
             dependents = self._index.dependents_of(row.name)
 
         self.detail.show_row(row, metadata=metadata, dependents=dependents)
+        # If the same row is still selected, tell the panel about any version/metadata
+        # that changed so the title and version line reflect the latest state.
+        self.detail._refresh_from_row(row, metadata=metadata)
 
     def _update_buttons(self) -> None:
         rows = self.selected_rows()

@@ -154,6 +154,16 @@ class SettingsView(QWidget):
             self._label(TranslationKey.SETTINGS_SHOW_OUTDATED), self._show_outdated
         )
 
+        self._package_manager = QComboBox(self)
+        self._package_manager.setObjectName("settingsCombo")
+        self._package_manager.setMinimumWidth(160)
+        for choice in ("auto", "pip", "uv"):
+            self._package_manager.addItem(self._package_manager_label(choice), choice)
+        self._package_manager.currentIndexChanged.connect(self._on_package_manager_changed)
+        behaviour_layout.addRow(
+            self._label(TranslationKey.SETTINGS_PACKAGE_MANAGER), self._package_manager
+        )
+
         layout.addRow(QWidget(self))
 
     # -- construction helpers ---------------------------------------------------
@@ -206,6 +216,14 @@ class SettingsView(QWidget):
             Language.FA: "\u0641\u0627",
         }[member]
 
+    @staticmethod
+    def _package_manager_label(choice: str) -> str:
+        return {
+            "auto": "auto",
+            "pip": "pip",
+            "uv": "uv",
+        }[choice]
+
     # -- population -------------------------------------------------------------
 
     def load_settings(self, settings: AppSettings) -> None:
@@ -224,6 +242,9 @@ class SettingsView(QWidget):
             self._confirm_upgrade.setChecked(settings.confirm_before_upgrade)
             self._show_sizes.setChecked(settings.show_sizes_by_default)
             self._show_outdated.setChecked(settings.show_outdated_by_default)
+            self._package_manager.setCurrentIndex(
+                ("auto", "pip", "uv").index(settings.package_manager)
+            )
         finally:
             self._loading = False
 
@@ -243,6 +264,7 @@ class SettingsView(QWidget):
                 confirm_before_upgrade=self._confirm_upgrade.isChecked(),
                 show_sizes_by_default=self._show_sizes.isChecked(),
                 show_outdated_by_default=self._show_outdated.isChecked(),
+                package_manager=self._package_manager.currentData(),
             )
         )
 
@@ -256,12 +278,21 @@ class SettingsView(QWidget):
         """The user picked a language; validate and push it back through the shell."""
         self.apply_current_settings()
 
+    def _on_package_manager_changed(self, _index: int) -> None:
+        """The user picked a package manager; persist and rebuild the provider."""
+        self.apply_current_settings()
+
     def apply_current_settings(self) -> None:
         """Validate the controls' current values and persist them."""
         if self._loading:
             return
         settings = self.current_settings()
+        old_package_manager = self._shell.settings.package_manager
         self._shell.apply_settings(settings)
+        # Changing the package manager must rebuild the provider so that newly
+        # opened environments use the chosen backend rather than the previous one.
+        if settings.package_manager != old_package_manager and hasattr(self._shell, "context"):
+            self._shell.context.set_package_manager(settings.package_manager)
         # The shell re-translates and re-themes the window, which reads the
         # controls back in the new language, so this write does not fight it.
         self._shell.save()
@@ -287,6 +318,9 @@ class SettingsView(QWidget):
             self._theme_combo.setItemText(index, self._theme_label(theme_member))
         for index, language_member in enumerate(Language):
             self._language_combo.setItemText(index, self._language_label(language_member))
+
+        for index, choice in enumerate(("auto", "pip", "uv")):
+            self._package_manager.setItemText(index, self._package_manager_label(choice))
 
 
 def _lines(text: str) -> tuple[str, ...]:

@@ -169,6 +169,23 @@ class PipBackend(Backend):
             backend="pip",
         )
 
+    def download_plan(self, action: PackageAction) -> CommandPlan | None:
+        """Download the targets to a cache directory without installing them.
+
+        This is used as a pre-step for upgrades so the package manager itself can be
+        upgraded without trying to replace the process that is currently running it.
+
+        .. NOTE::
+
+            Currently disabled. pip's ``download`` sub-command does not accept
+            ``--user`` (``no such option: --user``), and the existing call passes
+            ``*self._with_user(action, [])`` right before it. Until this is fixed
+            (either drop ``--user``, pass ``--user`` only for the real install, or
+            skip the download pre-step when ``--user`` is in play), keep this
+            returning ``None`` so homes with system Python are not broken.
+        """
+        return None
+
     def list_packages(
         self,
         environment: Path,

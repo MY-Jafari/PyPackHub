@@ -104,7 +104,7 @@ class ConfirmationDialog(QDialog):
 
         self.setObjectName("confirmationDialog")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(680)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -239,7 +239,7 @@ class BlockedDialog(QDialog):
         self._translator = translator
         self._wants_create = False
         self.setModal(True)
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(560)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -330,7 +330,7 @@ class RemovalPreviewDialog(QDialog):
         self._preview = preview
         self._translator = translator
         self.setModal(True)
-        self.setMinimumWidth(540)
+        self.setMinimumWidth(640)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -464,7 +464,7 @@ class CreateEnvironmentDialog(QDialog):
         self._translator = translator
 
         self.setModal(True)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(600)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -592,7 +592,7 @@ class InstallDialog(QDialog):
         self._error_code = ""
 
         self.setModal(True)
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(540)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -703,7 +703,7 @@ class DowngradeDialog(QDialog):
         self._translator = translator
 
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)

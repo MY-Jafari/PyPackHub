@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -51,6 +51,7 @@ class LogPanel(QWidget):
     """A read-only console, with a Cancel button while something is running."""
 
     cancel_requested = Signal()
+    hide_requested = Signal()
 
     def __init__(self, *, translator: Translator, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -91,12 +92,19 @@ class LogPanel(QWidget):
         self._cancel_button.setEnabled(False)
         header.addWidget(self._cancel_button)
 
+        self._hide_button = QPushButton(self)
+        self._hide_button.setObjectName("ghostButton")
+        self._hide_button.setText(translator.translate(TranslationKey.BUTTON_HIDE))
+        self._hide_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hide_button.clicked.connect(self.hide_requested.emit)
+        header.addWidget(self._hide_button)
+
         layout.addLayout(header)
 
         self._console = QPlainTextEdit(self)
         self._console.setObjectName("logConsole")
         self._console.setReadOnly(True)
-        self._console.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._console.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._console.setMaximumBlockCount(MAX_LINES)
         self._console.setMinimumHeight(120)
         layout.addWidget(self._console, 1)
@@ -178,6 +186,7 @@ class LogPanel(QWidget):
         self._save_button.setText(translator.translate(TranslationKey.LOG_SAVE))
         self._cancel_button.setText(translator.translate(TranslationKey.BUTTON_CANCEL))
         self._cancel_button.setToolTip(translator.translate(TranslationKey.LOG_CANCEL))
+        self._hide_button.setText(translator.translate(TranslationKey.LOG_HIDE))
         self.set_state(self._state)
 
     def _state_text(self, outcome: RunOutcome) -> str:

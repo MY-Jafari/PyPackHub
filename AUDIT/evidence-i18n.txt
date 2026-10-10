@@ -1,0 +1,21 @@
+### Translation table parity
+TranslationKey members      : 208
+EN_TABLE entries            : 208
+FA_TABLE entries            : 208
+enum members missing from EN : 0 []
+enum members missing from FA : 0 []
+EN keys with no enum member  : 0 []
+FA keys with no enum member  : 0 []
+
+keys whose Persian text equals the English text (candidates for review): 0
+
+empty English values: none
+empty Persian values: none
+
+### Placeholder parity ({name} style)
+keys with different placeholders in EN and FA: 0
+
+### Hard-coded user-visible strings in the UI layer
+candidates: 0
+
+done

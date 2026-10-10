@@ -1,0 +1,36 @@
+### 1. the table's listing matches real pip, exactly
+UI rows=1  pip list=1  equal=True
+UI error='' timed_out=False
+
+### 2. the plan a user confirms is the command that runs
+plan.display_command : "C:\\Users\\vayde\\AppData\\Local\\Temp\\pypackhub-audit-_4vueg8t\\throwaway-env\\Scripts\\python.exe" -m pip install -- "six==1.16.0"
+plan.argv            : ('C:\\Users\\vayde\\AppData\\Local\\Temp\\pypackhub-audit-_4vueg8t\\throwaway-env\\Scripts\\python.exe', '-m', 'pip', 'install', '--', 'six==1.16.0')
+backend.need_confirmation: True
+argv is a tuple (never a shell string): True
+argv element 'install' is present: -- True
+
+### 3. install -> verify -> downgrade -> upgrade -> uninstall
+  install six==1.16.0      returncode=0 six_now=1.16.0 ok=True
+  downgrade to 1.16.0      returncode=0 six_now=1.16.0 ok=True
+  upgrade six              returncode=0 six_now=1.17.0 ok=True
+
+  install a nonexistent package: returncode=1 ok=False
+   last 3 output lines:
+     | ERROR: Could not find a version that satisfies the requirement pypackhub-not-a-real-package-xyz (from versions: none)
+     | ERROR: No matching distribution found for pypackhub-not-a-real-package-xyz
+
+  uninstall six: returncode=0 six_now=None
+
+### 4. the table still agrees with pip after all of that
+UI rows=1  pip list=1  equal=True
+
+### 5. the plan for the system interpreter is refused, not executed
+  prefix        : C:\Program Files\Python313
+  modification  : ModificationPolicy(allowed=False, requires_confirmation=True, severity=<Severity.WARNING: 'warning'>, reason_code='target.base_interpreter', explanation='This is a base interpreter, not a virtual environment. Packages installed here are visible to every project that uses it.', suggestion="Create a virtual environment to keep this project's packages separate.", would_need_installer_override=False)
+  plan built for a system interpreter: YES
+  core.snapshots: absent (phase-2 feature)
+  core.security: absent (not implemented)
+  core.exporter: absent (phase-2 feature)
+  core.trust: absent (not implemented)
+
+throwaway venv left at: C:\Users\vayde\AppData\Local\Temp\pypackhub-audit-_4vueg8t\throwaway-env

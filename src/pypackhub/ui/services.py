@@ -44,12 +44,29 @@ class InventoryProvider(Protocol):
 class DefaultInventoryProvider:
     """The real provider: core inventory plus environment discovery."""
 
-    def __init__(self, *, prefer_uv: bool = True, search_working_directory: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        prefer_uv: bool = True,
+        search_working_directory: bool = True,
+        package_manager: str = "auto",
+    ) -> None:
         self._prefer_uv = prefer_uv
         self._search_working_directory = search_working_directory
+        self._package_manager = package_manager
 
     def create(self, prefix: Path) -> InventoryService:
-        return InventoryService(prefix=prefix, prefer_uv=self._prefer_uv)
+        return InventoryService(
+            prefix=prefix,
+            prefer_uv=self._prefer_uv,
+            backend_name=self._backend_name(prefix),
+        )
+
+    def _backend_name(self, prefix: Path) -> str:
+        """The backend name to use for *prefix*, honouring the user's choice."""
+        if self._package_manager and self._package_manager != "auto":
+            return self._package_manager
+        return ""
 
     def environments(self) -> tuple[Path, ...]:
         """Environments to offer: the built-in roots, plus this project's ``.venv``.
@@ -86,8 +103,11 @@ class UiContext:
         provider: InventoryProvider | None = None,
         tasks: TaskManager | None = None,
         default_environment: Path | None = None,
+        package_manager: str = "auto",
     ) -> None:
-        self.provider: InventoryProvider = provider or DefaultInventoryProvider()
+        self.provider: InventoryProvider = provider or DefaultInventoryProvider(
+            package_manager=package_manager
+        )
         self.tasks: TaskManager = tasks or TaskManager()
         self._default = (
             Path(default_environment).resolve()
@@ -95,10 +115,25 @@ class UiContext:
             else current_prefix()
         )
         self._services: dict[Path, InventoryService] = {}
+        self._package_manager = package_manager
 
     @property
     def default_environment(self) -> Path:
         return self._default
+
+    @property
+    def package_manager(self) -> str:
+        return self._package_manager
+
+    def set_package_manager(self, package_manager: str) -> None:
+        """Update the default backend choice and clear cached services."""
+        self._package_manager = package_manager
+        self.provider = DefaultInventoryProvider(
+            package_manager=package_manager,
+            prefer_uv=True,
+            search_working_directory=True,
+        )
+        self._services.clear()
 
     def set_default_environment(self, prefix: Path) -> None:
         self._default = Path(prefix).resolve()

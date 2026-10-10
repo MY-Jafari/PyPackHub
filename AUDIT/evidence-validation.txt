@@ -1,0 +1,91 @@
+### validate_package_spec - shell / option / path injection
+### validate_package_name
+### validate_environment_name
+### validate_index_url (HTTPS only by default)
+
+check             verdict        input -> detail
+package_spec      REJECTED       'foo; ls'  ValidationError
+package_spec      REJECTED       'foo && whoami'  ValidationError
+package_spec      REJECTED       'foo | tee /tmp/x'  ValidationError
+package_spec      REJECTED       '$(id)'  ValidationError
+package_spec      REJECTED       '`id`'  ValidationError
+package_spec      REJECTED       'foo\nbar'  ValidationError
+package_spec      REJECTED       'foo\r\nbar'  ValidationError
+package_spec      REJECTED       '--index-url=http://evil'  ValidationError
+package_spec      REJECTED       '-r /etc/passwd'  ValidationError
+package_spec      REJECTED       '--requirement=/etc/passwd'  ValidationError
+package_spec      REJECTED       '-e .'  ValidationError
+package_spec      REJECTED       '../../x'  ValidationError
+package_spec      REJECTED       '../../../etc/passwd'  ValidationError
+package_spec      REJECTED       'git+https://x/y'  ValidationError
+package_spec      REJECTED       'requests\n--extra-index-url=http://evil'  ValidationError
+package_spec      REJECTED       '\u200brequests'  ValidationError
+package_spec      REJECTED       'reqеusts'  ValidationError
+package_spec      REJECTED       'requests\x00'  ValidationError
+package_spec      REJECTED       'nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn'  ValidationError
+package_spec      ACCEPTED       'requests'  valid spec, correctly allowed
+package_spec      ACCEPTED       'requests>=2.0,!=1.0'  valid spec, correctly allowed
+package_spec      ACCEPTED       'requests[socks]==2.31.0'  valid spec, correctly allowed
+package_spec      *** REJECTED *** "Requests==2.31.0 ; python_version >= '3.9'"  ValidationError
+package_name      REJECTED       'foo; ls'  ValidationError
+package_name      REJECTED       '--index-url=http://evil'  ValidationError
+package_name      REJECTED       '../../x'  ValidationError
+package_name      REJECTED       '\u200breq'  ValidationError
+package_name      REJECTED       'reqеsts'  ValidationError
+package_name      REJECTED       'a\nb'  ValidationError
+environment_name  REJECTED       '../evil'  ValidationError
+environment_name  REJECTED       'a/b'  ValidationError
+environment_name  REJECTED       'a\\b'  ValidationError
+environment_name  REJECTED       ''  ValidationError
+environment_name  REJECTED       ' '  ValidationError
+environment_name  REJECTED       '-rf'  ValidationError
+environment_name  *** ACCEPTED *** 'CON'  no exception raised
+environment_name  REJECTED       'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'  ValidationError
+environment_name  REJECTED       '$(id)'  ValidationError
+environment_name  REJECTED       'a\nb'  ValidationError
+index_url         REJECTED       'http://pypi.org/simple'  ValidationError
+index_url         REJECTED       'file:///etc/passwd'  ValidationError
+index_url         REJECTED       'ftp://x/y'  ValidationError
+index_url         REJECTED       'https://user:secret@pypi.org/simple'  ValidationError
+index_url         ACCEPTED       'https://pypi.org/simple'  -> 'https://pypi.org/simple'
+
+total=44 correct=42 wrong=2
+UNEXPECTED VERDICT:
+    ('package_spec', '*** REJECTED ***', '"Requests==2.31.0 ; python_version >= \'3.9\'"', 'ValidationError')
+    ('environment_name', '*** ACCEPTED ***', "'CON'", 'no exception raised')
+
+### parse_requirements - hostile options in an imported file
+packages=2 review=6 invalid=2 requires_review=True applicable=False
+   REVIEW : LineKind.INVALID '--index-url=http://evil.example/simple'
+   REVIEW : LineKind.EDITABLE '-e .'
+   REVIEW : LineKind.INCLUDE '-r /etc/passwd'
+   REVIEW : LineKind.TRUSTED_HOST '--trusted-host=evil.example'
+   REVIEW : LineKind.EXTRA_INDEX_URL '--extra-index-url=https://evil.example/simple'
+   REVIEW : LineKind.INVALID 'git+https://x/y'
+   INVALID: LineKind.INVALID '--index-url=http://evil.example/simple'
+   INVALID: LineKind.INVALID 'git+https://x/y'
+   PACKAGE: 'requests>=2.0'
+   PACKAGE: 'normal_pkg==1.0'
+
+### ensure_deletable_environment - things that must never be deletable
+   (symlink not creatable here: [WinError 1314] A required privilege is not held by the client: 'C:\\Users\\vayde\\AppData\\Local\\Temp\\tmp92vdhluq\\outside' -> 'C:\\Users\\vayde\\AppData\\Local\\Temp\\tmp92vdhluq\\linkenv\\escape')
+   ALLOWED  : real venv (should be allowed) -> C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\realenv
+   REFUSED  : home directory (real) -> C:\Users\vayde (ValidationError: C:\Users\vayde is your home directory or one of its parents (refusing to delete it))
+   REFUSED  : parent of home -> C:\Users (ValidationError: C:\Users is your home directory or one of its parents (refusing to delete it))
+   REFUSED  : filesystem root -> \ (ValidationError: D:\ is a filesystem root)
+   REFUSED  : plain directory (not an env) -> C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\plaindir (ValidationError: C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\plaindir does not look like a Python environment (a virtual environment has a pyvenv.cfg; a conda environment has conda-meta))
+   REFUSED  : nonexistent path -> C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\nope (ValidationError: C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\nope does not exist)
+   REFUSED  : empty path -> . (ValidationError: D:\project_coding\PyPackHub does not look like a Python environment (a virtual environment has a pyvenv.cfg; a conda environment has conda-meta))
+   REFUSED  : Windows system directory -> C:\Windows\System32 (ValidationError: C:\Windows\System32 does not look like a Python environment (a virtual environment has a pyvenv.cfg; a conda environment has conda-meta))
+   REFUSED  : the running interpreter's prefix -> C:\Program Files\Python313 (ValidationError: C:\Program Files\Python313 is (or is inside) a protected Python installation: C:\Program Files\Python313 (refusing to delete a Python installation))
+   REFUSED  : a path with a symlink escape -> C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\linkenv\escape (ValidationError: C:\Users\vayde\AppData\Local\Temp\tmp92vdhluq\linkenv\escape does not exist)
+
+### is_verified_environment
+   True  real venv
+   False plain dir
+   False real home
+   True  link env
+   False link target (outside)
+   False filesystem root
+
+done

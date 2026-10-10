@@ -455,7 +455,9 @@ class DependenciesView(QWidget):
         else:
             self.orphans_requested_label.setVisible(False)
 
-        self.orphans_size_label.setText(self._size_text(report.measured, report.orphan_size_bytes))
+        self.orphans_size_label.setText(
+            self._size_text(report.measured, len(report.orphans), report.orphan_size_bytes)
+        )
         self.orphans_size_label.setVisible(report.measured > 0)
         self.summary_label.setText(
             self._shell.text(
@@ -484,12 +486,20 @@ class DependenciesView(QWidget):
         """Give the view a name -> bytes mapping to total the orphan sizes with."""
         self._size_source = sizes
 
-    def _size_text(self, measured: int, total: int) -> str:
+    def _size_text(self, measured: int, orphans: int, total: int) -> str:
+        """The reclaimable-size line, with a caveat only when some sizes are missing.
+
+        The note must not be appended unconditionally: saying "3 measured packages"
+        and "sizes not measured" in the same breath tells the user two opposite
+        things. It appears only when the measurement is genuinely incomplete.
+        """
         text = self._shell.text(
             TranslationKey.DEPS_ORPHANS_SIZE,
             size=format_bytes(total),
             count=measured,
         )
+        if orphans <= 0 or measured >= orphans:
+            return text
         return f"{text} ({self._shell.text(TranslationKey.DEPS_ORPHANS_PARTIAL)})"
 
     # -- removal ---------------------------------------------------------------

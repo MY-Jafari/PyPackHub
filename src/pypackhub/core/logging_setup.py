@@ -1,9 +1,9 @@
 """Logging setup for PyPackHub's headless core.
 
 This module is the single place that configures the process-wide logger the core
-uses. It is deliberately boring: a JSON-ish-ish log file that rotates, and a
-redacting filter so credentials never leak into on-disk logs even when some
-future logging call forgets to redact its own arguments.
+uses. It is deliberately boring: a plain, rotating log file, and a redacting
+filter so credentials never leak into on-disk logs even when some future logging
+call forgets to redact its own arguments.
 
 The log file is created under a platformdirs app data directory so it follows
 the same rules as the rest of the application's persistent state. The UI layer

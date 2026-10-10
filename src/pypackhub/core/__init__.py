@@ -27,17 +27,15 @@ Implemented so far (section 1 of the Phase 1 plan):
 ``net``
     The HTTPS-only HTTP client with size limits and safe JSON parsing.
 
-Built in section 2: ``settings``, ``logging_setup``, ``environments``,
-``sizes``, ``pypi``, ``tasks``, ``backends/`` (pip and uv), ``report``.
+Later sections add: ``settings``, ``logging_setup``, ``environments``,
+``metadata``, ``inventory``, ``deps``, ``sizes``, ``pypi``, ``tasks``, and
+``backends/`` (pip and uv).
 
 Still ahead, in the order ``docs/DECISIONS.md`` records:
 
-* section 4: the packages view - install, uninstall, upgrade and downgrade
-  through the backends, the live log, and the confirmation dialogs;
-* section 5: the settings page and the PEP 668 "create a virtual environment"
-  flow;
-* later phases: ``deps``, ``security``, ``trust``, ``snapshots``, ``exporter``,
-  ``binaries``, ``tags``, the conda/poetry/pipx/pipenv/pdm backends.
+* phase 2+: ``security`` (vulnerability lookups), ``trust`` (typosquatting),
+  ``snapshots``, ``exporter``, ``binaries``, ``tags``;
+* later phases: the conda/poetry/pipx/pipenv/pdm backends.
 """
 
 from __future__ import annotations

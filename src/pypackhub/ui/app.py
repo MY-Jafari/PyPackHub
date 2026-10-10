@@ -22,7 +22,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtGui import QFontDatabase, QGuiApplication
+from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication
 
 from pypackhub import APP_DISPLAY_NAME, APP_ID, __version__
@@ -77,14 +77,16 @@ def build_application(argv: list[str] | None = None) -> QApplication:
     return application
 
 
-def build_context(*, prefer_uv: bool = True) -> UiContext:
+def build_context(*, prefer_uv: bool = True, package_manager: str = "auto") -> UiContext:
     """Build the services the views run against.
 
     ``prefer_uv`` follows SPEC section 2: when uv is installed, it is the backend
     for an environment, because it is dramatically faster, and every action still
     goes through the same hardened runner either way.
     """
-    return UiContext(provider=DefaultInventoryProvider(prefer_uv=prefer_uv))
+    return UiContext(
+        provider=DefaultInventoryProvider(prefer_uv=prefer_uv, package_manager=package_manager)
+    )
 
 
 def build_window(
@@ -94,11 +96,48 @@ def build_window(
     shell = WindowShell(store=store or QSettingsStore())
     shell.load()
 
+    package_manager = shell.settings.package_manager
+
     # ``shell=`` is PyPackHub's own window-shell object, not a command shell; this
     # is a bandit false positive on the keyword's name (B604, low confidence).
-    window = MainWindow(shell=shell, context=context or build_context())  # nosec B604
+    window = MainWindow(
+        shell=shell,
+        context=context or build_context(package_manager=package_manager),  # nosec B604
+    )
     window.apply_theme()
     return window
+
+
+def _app_icon() -> QIcon | None:
+    """Return the bundled application icon, or ``None`` when it is missing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter, QPixmap
+    from PySide6.QtSvg import QSvgRenderer
+
+    icon_path = Path(__file__).resolve().parents[1] / "assets" / "icons" / "app.svg"
+    if not icon_path.is_file():
+        return None
+
+    renderer = QSvgRenderer(str(icon_path))
+    if renderer is None:
+        return None
+
+    pixmap = QPixmap(256, 256)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        renderer.render(painter)
+    except Exception:
+        return None
+    finally:
+        painter.end()
+
+    icon = QIcon(pixmap)
+    sizes = (16, 32, 64, 128)
+    for size in sizes:
+        scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio)
+        icon.addPixmap(scaled, QIcon.Mode.Normal, QIcon.State.Off)
+    return icon
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -107,7 +146,13 @@ def run(argv: list[str] | None = None) -> int:
     register_bundled_fonts()
     settings_data_directory()
 
+    icon = _app_icon()
+    if icon is not None:
+        application.setWindowIcon(icon)
+
     window = build_window()
+    if icon is not None:
+        window.setWindowIcon(icon)
     window.show()
 
     return application.exec()

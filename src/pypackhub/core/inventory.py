@@ -25,6 +25,7 @@ Three properties matter and are deliberate:
 from __future__ import annotations
 
 import threading
+from builtins import list as _list
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -39,7 +40,6 @@ from pypackhub.core.backends.base import (
     CommandPlan,
     InstalledPackage,
     PackageAction,
-    PackageListing,
     UnsupportedBackendError,
 )
 from pypackhub.core.backends.pip import PipBackend
@@ -316,28 +316,57 @@ class InventoryService:
     # -- listing --------------------------------------------------------
 
     def list(self) -> Inventory:
-        """List the installed packages. Local only: no network, no size walk."""
-        listing: PackageListing = self.backend.list_packages(self._prefix, facts=self.facts)
+        """List the installed packages. Local only: no network, no size walk.
 
-        if listing.error and not listing.packages:
-            return Inventory(
-                environment=self._prefix,
-                backend=listing.backend,
-                error=listing.error,
-                timed_out=listing.timed_out,
-            )
-
-        rows = sorted(
-            (_row_from_package(package) for package in listing.packages),
-            key=lambda row: row.name.lower(),
-        )
+        The listing merges every usable backend for the environment so a package is
+        never invisible just because one manager did not report it. The backend used
+        for actions is still decided separately by the user's package-manager choice.
+        """
+        merged, error, timed_out, backend_name = self._merge_listings()
         return Inventory(
             environment=self._prefix,
-            backend=listing.backend,
-            rows=tuple(rows),
-            error=listing.error,
-            timed_out=listing.timed_out,
+            backend=backend_name,
+            rows=tuple(merged),
+            error=error,
+            timed_out=timed_out,
         )
+
+    def _merge_listings(self) -> tuple[_list[PackageRow], str, bool, str]:
+        """List through every usable backend and merge the results.
+
+        Returns the merged rows (deduplicated by normalised name, first reporter
+        wins), a combined error string, whether any listing timed out, and the name
+        of the first backend that produced rows.
+        """
+        rows: dict[str, PackageRow] = {}
+        error_parts: list[str] = []
+        timed_out = False
+        backend_name = ""
+
+        for name in self._prefer:
+            try:
+                backend = _make_backend(name, self._prefix, self.facts.executable)
+                backend.executable_path()
+            except (UnsupportedBackendError, ValueError, OSError):
+                continue
+
+            listing = backend.list_packages(self._prefix, facts=self.facts)
+            if listing.packages and not backend_name:
+                backend_name = listing.backend
+            if listing.timed_out:
+                timed_out = True
+            if listing.error and not listing.packages:
+                error_parts.append(f"{listing.backend}: {listing.error}")
+                continue
+
+            for package in listing.packages:
+                key = _normalized(package.name)
+                if key not in rows:
+                    rows[key] = _row_from_package(package)
+
+        error = " | ".join(error_parts) if error_parts else ""
+        merged = sorted(rows.values(), key=lambda row: row.name.lower())
+        return merged, error, timed_out, backend_name or "pip"
 
     def index_info(self, name: str) -> PackageIndexInfo:
         """Ask the package index for one package.

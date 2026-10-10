@@ -1,0 +1,356 @@
+name: Release
+
+# Builds the stand-alone installers for Windows, macOS and Linux and publishes
+# them, with checksums, on a GitHub Release for the tag.
+#
+# Every tag matching v*.*.* releases. The workflow can also be dispatched by
+# hand, in which case `tag` picks the release name (blank: v<pyproject version>).
+# In both cases the tag has to agree with pyproject.toml, because the same number
+# is baked into the executable's version resource and shown in the About box - a
+# release that disagrees with itself is worse than no release.
+#
+# The four jobs are deliberately chained rather than parallel: a broken tree
+# should never reach a published asset.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (blank: v + the version in pyproject.toml)"
+        required: false
+        default: ""
+        type: string
+
+# The workflow itself only needs read access; the job that publishes is granted
+# `contents: write` on its own, which is as little privilege as this can work
+# with.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  # No display server on a runner, and the smoke test runs the built app with
+  # the same platform plugin.
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  verify:
+    name: Lint, type-check and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the project and the dev tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check --output-format=github .
+
+      - name: black
+        run: black --check --diff .
+
+      - name: mypy
+        run: mypy
+
+      - name: Banned patterns
+        run: python scripts/security_scan.py
+
+      - name: bandit
+        run: bandit -c pyproject.toml -r src
+
+      - name: pytest
+        run: python -m pytest -q
+
+  version:
+    name: Resolve the version
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Compare the tag with pyproject.toml
+        id: resolve
+        shell: bash
+        # The inputs are passed through the environment rather than interpolated
+        # into the script: a workflow input is attacker-controlled text and must
+        # not become shell source.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          declared=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+
+          case "${EVENT_NAME}" in
+            workflow_dispatch)
+              if [ -n "${INPUT_TAG}" ]; then tag="${INPUT_TAG}"; else tag="v${declared}"; fi
+              ;;
+            *)
+              tag="${REF_NAME}"
+              ;;
+          esac
+
+          version="${tag#v}"
+
+          if [ "${version}" != "${declared}" ]; then
+            echo "::error::Tag '${tag}' does not match pyproject.toml version '${declared}'. The installer's version resource and the About box would disagree with the release."
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Releasing PyPackHub ${version} as ${tag}"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-latest is x86_64. windows-latest too.
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target_arch: ""
+          - name: windows-x86_64
+            os: windows-latest
+            target_arch: ""
+          # macos-13 (the Intel image) was retired in December 2025; macos-15 is
+          # Apple Silicon. Building universal2 from it serves both architectures
+          # from one runner and one artifact - the actual result is read back
+          # with lipo below rather than assumed.
+          - name: macos
+            os: macos-15
+            target_arch: universal2
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the project and the bundler
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[packaging]"
+
+      - name: Render the application icons
+        run: python packaging/make_icons.py
+
+      - name: Build the stand-alone bundle
+        env:
+          PYPACKHUB_VERSION: ${{ needs.version.outputs.version }}
+          PYPACKHUB_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: python -m PyInstaller packaging/pypackhub.spec --noconfirm --distpath dist --workpath build/pyinstaller
+
+      # A successful PyInstaller run only proves the files were written. This
+      # checks the fonts, icon and CA bundle are present, then launches the real
+      # executable and insists it stays up - which is what catches a missing
+      # Qt module or an over-eager exclusion in the spec.
+      - name: Smoke test the built bundle
+        run: python packaging/smoke_test.py --dist dist --grace 15
+
+      - name: Read back the architectures that were actually built
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="dist/PyPackHub.app/Contents/MacOS/PyPackHub"
+          archs=$(lipo -archs "${binary}" | tr ' ' '\n' | sort | tr '\n' '-' | sed 's/-$//')
+          echo "MACOS_ARCHS=${archs}" >> "${GITHUB_ENV}"
+          echo "Built architectures: ${archs}"
+          if [ "${archs}" != "arm64-x86_64" ]; then
+            echo "::notice title=macOS bundle is not universal2::PyInstaller produced '${archs}'. The artifact is named after what was built, not what was requested."
+          fi
+
+      - name: Package the Linux bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # The installer script and the desktop icon travel inside the archive,
+          # so the tarball is self-sufficient: unpack, run ./install.sh, done.
+          cp packaging/linux/install.sh dist/install.sh
+          cp packaging/icon.png dist/icon.png
+          chmod +x dist/install.sh
+          tar -czf "release/PyPackHub-${VERSION}-linux-x86_64.tar.gz" -C dist PyPackHub install.sh icon.png
+
+      - name: Package the Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          mkdir -Force release | Out-Null
+          # shutil.make_archive is used instead of Compress-Archive so the
+          # archive matches the Linux tarball in shape: one top-level
+          # PyPackHub/ directory, paths stored with forward slashes.
+          python -c "import os, shutil; shutil.make_archive('release/PyPackHub-%s-windows-x86_64' % os.environ['VERSION'], 'zip', root_dir='dist', base_dir='PyPackHub')"
+          if ($LASTEXITCODE -ne 0) { throw "zipping the Windows bundle failed with $LASTEXITCODE" }
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Locate Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The Windows runner images ship Inno Setup, but at a path that moves
+          # with the image version. Find it, and say so plainly when it is gone
+          # rather than failing half-way through packaging. PowerShell rather
+          # than bash: MSYS rewrites arguments that start with a slash, and
+          # Inno Setup's switches all do.
+          $found = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe", "C:\Program Files\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($found) {
+            "ISCC=$($found.FullName)" >> $env:GITHUB_ENV
+            Write-Host "Inno Setup: $($found.FullName)"
+          } else {
+            "ISCC=" >> $env:GITHUB_ENV
+            Write-Host "::warning::Inno Setup was not found; the Windows setup.exe will not be produced and only the zip will be published."
+          }
+
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:ISCC)) {
+            Write-Host "No Inno Setup available; the zip is the Windows artifact."
+            exit 0
+          }
+          # Absolute paths: the recipe defaults to paths relative to itself, and
+          # passing the real locations makes a mis-invocation fail loudly instead
+          # of compiling the wrong directory.
+          $bundle = (Resolve-Path "dist\PyPackHub").Path
+          $output = (New-Item -ItemType Directory -Force -Path "release").FullName
+          $icon = (Resolve-Path "packaging\icon.ico").Path
+          & $env:ISCC "/DAppVersion=$env:VERSION" "/DBundleDir=$bundle" "/DOutputDirectory=$output" "/DIconFile=$icon" packaging\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with $LASTEXITCODE" }
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Package the macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # ditto keeps the resource forks and the extended attributes Finder
+          # needs to treat the .app as an application.
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/PyPackHub.app \
+            "release/PyPackHub-${VERSION}-macos-${MACOS_ARCHS}.zip"
+
+      - name: List what was produced
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la release
+          test -n "$(ls -A release)"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: release/*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Download every installer
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Build the wheel and the sdist too
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --outdir release
+
+      - name: Generate the checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          echo "Checksums:"
+          cat SHA256SUMS.txt
+          # Every expected platform has to be here. An artifact that silently
+          # failed to upload is the one people notice a week later.
+          for required in \
+            "PyPackHub-${VERSION}-linux-x86_64.tar.gz" \
+            "PyPackHub-${VERSION}-windows-x86_64.zip" \
+            "pypackhub-${VERSION}-py3-none-any.whl"; do
+            if ! grep -q " ${required}$" SHA256SUMS.txt; then
+              echo "::error::${required} is missing from the release assets."
+              exit 1
+            fi
+          done
+          if ! grep -qE "PyPackHub-${VERSION}-macos-.+\.zip" SHA256SUMS.txt; then
+            echo "::error::the macOS bundle is missing from the release assets."
+            exit 1
+          fi
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: PyPackHub ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/*

@@ -143,6 +143,18 @@ class UvBackend(Backend):
             backend="uv",
         )
 
+    def download_plan(self, action: PackageAction) -> CommandPlan | None:
+        """uv has no ``pip download`` equivalent, so there is no pre-step.
+
+        pip needs a download-then-install dance so it can replace itself while it
+        is running; uv merges downloading into ``uv pip install`` behind a
+        persistent cache and is a standalone binary that never upgrades itself
+        through ``pip``, so the dance has no counterpart here. Emitting
+        ``uv pip download`` would only fail with "unrecognized subcommand", so the
+        install runs in a single pass.
+        """
+        return None
+
     def list_packages(
         self,
         environment: Path,
