@@ -32,6 +32,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -49,9 +50,11 @@ __all__ = [
     "ExecutableNotFoundError",
     "InvalidCommandError",
     "RunnerError",
+    "elevation_supported",
     "format_argument",
     "resolve_executable",
     "run",
+    "run_elevated",
     "safe_search_path",
     "sanitized_environment",
     "terminate_process_tree",
@@ -565,3 +568,239 @@ def run(
         raise CommandFailedError(result)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Elevated execution (SPEC section 11.5)
+# ---------------------------------------------------------------------------
+
+#: Windows error code the UAC consent dialog leaves behind when the user
+#: answered "No". Reported as a *cancellation*: the command never ran, so
+#: nothing failed - the user stopped it before it could.
+_ERROR_CANCELLED: Final = 1223
+
+#: ``WAIT_TIMEOUT`` from the Windows API: the handle is still there, keep waiting.
+_WAIT_TIMEOUT: Final = 258
+
+#: ``WAIT_FAILED`` from the Windows API: the wait itself is broken.
+_WAIT_FAILED: Final = 0xFFFFFFFF
+
+#: How long the elevated-process handle gets to disappear after a terminate,
+#: before the exit code is read anyway.
+_ELEVATED_GRACE_MS: Final = int(GRACE_PERIOD * 1000)
+
+
+def elevation_supported() -> bool:
+    """Whether the OS offers a standard elevation mechanism this runner can use.
+
+    Windows has UAC - ``ShellExecuteEx`` with the ``runas`` verb - and Linux
+    has polkit's ``pkexec``, which takes an executable plus its argument list
+    like this runner passes every command. macOS is the deliberate exception:
+    its only route is embedding the command in an AppleScript string, which is
+    exactly the string-command execution the security rules forbid, so the
+    answer is False there and the UI offers pip instead.
+    """
+    if os.name == "nt":
+        return True
+    if sys.platform == "darwin":  # pragma: no cover - no macOS CI runner
+        return False
+    return shutil.which("pkexec") is not None
+
+
+def run_elevated(
+    argv: Sequence[str],
+    *,
+    timeout: float | None = DEFAULT_TIMEOUT,
+    cancel: threading.Event | None = None,
+) -> CommandResult:
+    """Run one confirmed command through the OS's standard elevation mechanism.
+
+    SPEC section 11.5 in code: the elevation covers a *single* action the UI
+    has already explained, it goes through the OS's own consent mechanism
+    (never a re-run of this process as root), and nothing about it persists
+    after the command ends.
+
+    What is executed obeys the same rules as :func:`run`: an argument list
+    only, an explicitly resolved executable, a timeout enforced against the
+    real process. What elevation cannot carry over is output - the consent
+    boundary does not pass pipes on Windows - so the result carries no
+    streamed log there and the caller tells the user that instead of
+    presenting a silent run as a feature.
+
+    A user who declines the OS's prompt is reported as a cancellation for the
+    same reason a stopped process is: the command never ran, and "cancelled"
+    is what the UI already says in the user's language.
+    """
+    arguments = validate_argv(argv)
+    executable = resolve_executable(arguments[0])
+    command = (executable, *arguments[1:])
+
+    if os.name == "nt":
+        return _run_elevated_windows(command, timeout=timeout, cancel=cancel)
+
+    return _run_elevated_posix(command, timeout=timeout, cancel=cancel)
+
+
+def _run_elevated_windows(
+    command: tuple[str, ...],
+    *,
+    timeout: float | None,
+    cancel: threading.Event | None,
+) -> CommandResult:
+    """Ask UAC to run the command, then supervise the elevated process.
+
+    ``ShellExecuteEx`` with the ``runas`` verb is the OS's own mechanism: the
+    consent dialog is Windows', the elevated token is granted by Windows, and
+    this process stays unprivileged throughout. The parameters string is
+    built with :func:`subprocess.list2cmdline` - the canonical quoting for a
+    Windows argument vector - from arguments that already passed the core
+    validators; no shell is involved at any point.
+    """
+    import ctypes
+    import importlib
+
+    # Reached through ``getattr``/``importlib`` on purpose: they exist only on
+    # Windows, and the type checker is configured to check this tree as POSIX,
+    # so a direct ``ctypes.WinDLL`` would be rejected here while being the one
+    # thing that must run there (the same convention the platform-specific
+    # constants elsewhere in this module follow).
+    wintypes = importlib.import_module("ctypes.wintypes")
+    windows_dll = getattr(ctypes, "WinDLL")  # noqa: B009 - absent on the POSIX type-check platform
+    last_error = getattr(ctypes, "get_last_error")  # noqa: B009 - absent on the POSIX platform
+
+    see_mask_nocloseprocess = 0x00000040
+    sw_hide = 0
+
+    class ShellExecuteInfoW(ctypes.Structure):
+        """``SHELLEXECUTEINFOW``; the union member is a plain ``HANDLE``."""
+
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", wintypes.ULONG),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIconOrMonitor", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    shell32 = windows_dll("shell32", use_last_error=True)
+    kernel32 = windows_dll("kernel32", use_last_error=True)
+
+    info = ShellExecuteInfoW()
+    info.cbSize = ctypes.sizeof(ShellExecuteInfoW)
+    info.fMask = see_mask_nocloseprocess
+    info.lpVerb = "runas"
+    info.lpFile = command[0]
+    info.lpParameters = subprocess.list2cmdline(command[1:])
+    info.nShow = sw_hide
+
+    started = time.monotonic()
+
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        code = last_error()
+        if code == _ERROR_CANCELLED:
+            return CommandResult(
+                argv=command,
+                returncode=-1,
+                stdout="",
+                stderr="",
+                duration=time.monotonic() - started,
+                cancelled=True,
+            )
+        return CommandResult(
+            argv=command,
+            returncode=-1,
+            stdout="",
+            stderr=f"the elevated command could not be started (Windows error {code})",
+            duration=time.monotonic() - started,
+        )
+
+    process = info.hProcess
+    if not process:  # pragma: no cover - NOCLOSEPROCESS promises a handle
+        return CommandResult(
+            argv=command,
+            returncode=-1,
+            stdout="",
+            stderr="the elevation succeeded but no process handle was returned",
+            duration=time.monotonic() - started,
+        )
+
+    deadline = None if timeout is None else started + timeout
+    timed_out = False
+    cancelled = False
+
+    while True:
+        state = kernel32.WaitForSingleObject(process, 250)
+        if state != _WAIT_TIMEOUT:
+            break
+        if cancel is not None and cancel.is_set():
+            cancelled = True
+            kernel32.TerminateProcess(process, 1)
+            kernel32.WaitForSingleObject(process, _ELEVATED_GRACE_MS)
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            timed_out = True
+            kernel32.TerminateProcess(process, 1)
+            kernel32.WaitForSingleObject(process, _ELEVATED_GRACE_MS)
+            break
+
+    exit_code = wintypes.DWORD(_WAIT_FAILED)
+    kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
+    kernel32.CloseHandle(process)
+
+    returncode = -1 if exit_code.value == _WAIT_FAILED else int(exit_code.value)
+    return CommandResult(
+        argv=command,
+        returncode=returncode,
+        stdout="",
+        stderr="",
+        duration=time.monotonic() - started,
+        timed_out=timed_out,
+        cancelled=cancelled,
+    )
+
+
+def _run_elevated_posix(
+    command: tuple[str, ...],
+    *,
+    timeout: float | None,
+    cancel: threading.Event | None,
+) -> CommandResult:
+    """Run the command through polkit, or explain that there is no way to.
+
+    ``pkexec`` is polkit's standard mechanism and takes an executable plus its
+    argument list - no shell is involved anywhere - so the hardened runner
+    applies unchanged, output is captured for the result, and cancellation
+    works exactly like any other command's.
+    """
+    if sys.platform == "darwin":  # pragma: no cover - no macOS CI runner
+        return CommandResult(
+            argv=command,
+            returncode=-1,
+            stdout="",
+            stderr=(
+                "macOS offers no elevation mechanism that accepts an argument "
+                "list; use pip for this environment instead"
+            ),
+            duration=0.0,
+        )
+
+    if shutil.which("pkexec") is None:
+        return CommandResult(
+            argv=command,
+            returncode=-1,
+            stdout="",
+            stderr="pkexec (polkit) was not found, so this command cannot be elevated here",
+            duration=0.0,
+        )
+
+    return run(("pkexec", *command), timeout=timeout, cancel=cancel)

@@ -22,8 +22,10 @@ Three rules are enforced here rather than hoped for:
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -43,10 +45,11 @@ from PySide6.QtWidgets import (
 
 from pypackhub.core.backends.base import ActionKind, BackendError, CommandPlan, PackageAction
 from pypackhub.core.environments import create_environment
-from pypackhub.core.inventory import Inventory, InventoryService, PackageRow
-from pypackhub.core.metadata import InstalledMetadataIndex
+from pypackhub.core.inventory import Inventory, InventoryService, PackageRow, action_target_names
+from pypackhub.core.metadata import InstalledMetadataIndex, normalize_name
 from pypackhub.core.platform_guard import ModificationPolicy, Severity
-from pypackhub.core.runner import CommandResult
+from pypackhub.core.runner import CommandResult, elevation_supported
+from pypackhub.core.snapshots import SnapshotDiff, SnapshotStore, restore_specs
 from pypackhub.core.tasks import JobState, TaskResult
 from pypackhub.core.validation import ValidationError
 from pypackhub.ui.formatting import format_bytes
@@ -62,7 +65,10 @@ from pypackhub.ui.widgets.dialogs import (
     CreateEnvironmentDialog,
     CreateEnvironmentRequest,
     DowngradeDialog,
+    ElevationNotice,
+    FallbackNotice,
     InstallDialog,
+    RollbackPreviewDialog,
 )
 from pypackhub.ui.widgets.log_panel import LogPanel, RunOutcome
 from pypackhub.ui.widgets.package_table import (
@@ -74,6 +80,7 @@ from pypackhub.ui.widgets.package_table import (
 )
 from pypackhub.ui.widgets.spinner import Spinner, SpinnerSize
 from pypackhub.ui.widgets.toast import ToastKind
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["PackagesView", "RefreshOutcome"]
 
@@ -93,6 +100,7 @@ class PackagesView(QWidget):
     #: Emitted from a worker thread; Qt queues them onto the GUI thread because
     #: the receiver (this widget) lives there.
     row_updated = Signal(object)
+    listed = Signal(object)
     refresh_finished = Signal(object)
     run_finished = Signal(object)
     create_finished = Signal(object)
@@ -106,6 +114,7 @@ class PackagesView(QWidget):
         context: UiContext,
         shell: WindowShell,
         log_panel: LogPanel,
+        snapshots: SnapshotStore | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -114,13 +123,18 @@ class PackagesView(QWidget):
         self._log = log_panel
 
         self._environment: Path = context.default_environment
-        self._service: InventoryService | None = None
         self._inventory: Inventory | None = None
         self._index: InstalledMetadataIndex | None = None
         self._cancel: threading.Event | None = None
         self._refresh_task: str = ""
+        self._refresh_pending = False
         self._run_task: str = ""
         self._create_task: str = ""
+        #: Confirmed plans waiting for the running one to finish (a rollback
+        #: or an undo can be two commands the user approved as one decision).
+        self._plan_queue: list[tuple[CommandPlan, bool]] = []
+        #: The snapshot store behind the automatic snapshots and the undo.
+        self._snapshots = snapshots if snapshots is not None else SnapshotStore()
 
         self._spinner = Spinner(size=SpinnerSize.MEDIUM)
         self._spinner.hide()
@@ -157,10 +171,16 @@ class PackagesView(QWidget):
         self.search_edit.setMinimumWidth(220)
         toolbar.addWidget(self.search_edit)
 
+        # Both switches start in the state the settings page stores for them, so
+        # "show outdated packages" and "show package sizes" mean something on the
+        # next launch instead of resetting themselves every time. They are
+        # connected after this, so setting them here does not look like a click.
         self.outdated_check = QCheckBox(self)
+        self.outdated_check.setChecked(self._shell.settings.show_outdated_by_default)
         toolbar.addWidget(self.outdated_check)
 
         self.sizes_check = QCheckBox(self)
+        self.sizes_check.setChecked(self._shell.settings.show_sizes_by_default)
         toolbar.addWidget(self.sizes_check)
 
         toolbar.addStretch(1)
@@ -262,14 +282,16 @@ class PackagesView(QWidget):
 
     def _connect(self) -> None:
         self.search_edit.textChanged.connect(self.proxy.set_query)
-        self.outdated_check.toggled.connect(self.proxy.set_outdated_only)
+        self.outdated_check.toggled.connect(self._outdated_toggled)
         self.sizes_check.toggled.connect(self._sizes_toggled)
+        self.proxy.set_outdated_only(self.outdated_check.isChecked())
         self.table.selectionModel().selectionChanged.connect(self._selection_changed)
         self.table.doubleClicked.connect(lambda _index: self._update_detail_for_current())
 
         # These signals are emitted from worker threads; connecting them to slots
         # on this widget makes Qt queue the calls onto the GUI thread.
         self.row_updated.connect(self._on_row_updated)
+        self.listed.connect(self._on_listed)
         self.refresh_finished.connect(self._on_refresh_finished)
         self.run_finished.connect(self._on_run_finished)
         self.create_finished.connect(self._on_create_finished)
@@ -283,9 +305,11 @@ class PackagesView(QWidget):
 
     @property
     def service(self) -> InventoryService:
-        if self._service is None:
-            self._service = self._context.service_for(self._environment)
-        return self._service
+        # Asked through the context rather than cached here on purpose: the
+        # context keeps one service per environment, and it is the one a
+        # package-manager change invalidates. A private copy is how a manager
+        # picked in the settings page kept being ignored until the next launch.
+        return self._context.service_for(self._environment)
 
     @property
     def inventory(self) -> Inventory | None:
@@ -302,7 +326,6 @@ class PackagesView(QWidget):
             return
 
         self._environment = resolved
-        self._service = None
         self._inventory = None
         self._index = None
         self.model.set_inventory(None)
@@ -331,6 +354,12 @@ class PackagesView(QWidget):
     def refresh(self) -> None:
         """Reload the environment: listing now, PyPI and sizes progressively."""
         if self._refresh_task:
+            # A refresh is already running. Queue exactly one more instead of
+            # dropping this request: the running pass may have read the
+            # environment *before* the change that is asking for this refresh,
+            # which is how the table kept showing a package's old version after
+            # it had been upgraded.
+            self._refresh_pending = True
             return
 
         with_sizes = self.sizes_check.isChecked()
@@ -338,16 +367,28 @@ class PackagesView(QWidget):
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> RefreshOutcome:
             service = self._context.service_for(self._environment)
+            listed: Inventory | None = None
+
+            def remember(inventory: Inventory) -> None:
+                """Keep the listing this pass produced, and show it now."""
+                nonlocal listed
+                listed = inventory
+                emit_if_alive(self.listed, inventory)
+
             try:
                 inventory = service.refresh(
                     with_sizes=with_sizes,
                     with_latest=True,
-                    on_row=self.row_updated.emit,
+                    on_listed=remember,
+                    on_row=lambda row: emit_if_alive(self.row_updated, row),
                     cancel=cancel,
                 )
                 index = service.metadata_index()
             except Exception as error:
-                return RefreshOutcome(error=str(error))
+                # The listing may already be on screen even when a later phase
+                # failed, so it is handed back with the error rather than thrown
+                # away: an index that is unreachable must not empty the table.
+                return RefreshOutcome(inventory=listed, error=str(error))
 
             if cancel.is_set():
                 return RefreshOutcome(inventory=inventory, index=index, error="cancelled")
@@ -357,7 +398,7 @@ class PackagesView(QWidget):
         self._refresh_task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.PACKAGES_REFRESHING),
             work,
-            on_finish=lambda _task_id, result: self.refresh_finished.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.refresh_finished, result),
         )
         # Reveal the spinner container as well as the spinner itself: the spinner
         # lives inside a hidden container, so starting it alone left nothing on
@@ -372,6 +413,19 @@ class PackagesView(QWidget):
         self._spinner_container.setVisible(False)
         self.refresh_button.setEnabled(True)
 
+        try:
+            self._apply_refresh_outcome(result)
+        finally:
+            # A refresh that was asked for while this one was running happens now,
+            # once the state this pass read has been rendered. Dropping it was how
+            # a change that finished mid-refresh left the table showing the
+            # versions from before it.
+            if self._refresh_pending:
+                self._refresh_pending = False
+                self.refresh()
+
+    def _apply_refresh_outcome(self, result: TaskResult) -> None:
+        """Render one finished refresh, or explain why there is nothing to render."""
         outcome = result.payload if isinstance(result.payload, RefreshOutcome) else None
 
         if result.state is JobState.FAILED:
@@ -394,14 +448,52 @@ class PackagesView(QWidget):
         self._update_summary()
         self._update_empty_state()
         self._update_detail_for_current()
-        self.status_changed.emit(outcome.inventory.error or "")
+        self.status_changed.emit(outcome.error or outcome.inventory.error or "")
+        # A pass that listed the environment but could not reach the index still
+        # has a usable table; the failure is reported without discarding it.
+        if outcome.error and outcome.error != "cancelled":
+            self.toast.emit(outcome.error, ToastKind.ERROR)
+
+    def _outdated_toggled(self, checked: bool) -> None:
+        """Apply the outdated-only filter, and remember the choice.
+
+        The settings page writes this preference; the toolbar is where it is
+        actually used, so the toolbar writes it back.
+        """
+        self.proxy.set_outdated_only(checked)
+        self._shell.apply_settings(replace(self._shell.settings, show_outdated_by_default=checked))
+        self._shell.save()
 
     def _sizes_toggled(self, checked: bool) -> None:
-        """Measure sizes on demand, without a second network pass."""
-        if not checked or self._inventory is None:
+        """Measure sizes on demand, and remember the choice.
+
+        Turning the switch off drops the numbers that were measured with it, so it
+        reads as a switch rather than as a one-way door.
+        """
+        self._shell.apply_settings(replace(self._shell.settings, show_sizes_by_default=checked))
+        self._shell.save()
+
+        if not checked:
+            self._clear_sizes()
             return
+
+        if self._inventory is None:
+            return
+
         self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_MEASURING))
         self.refresh()
+
+    def _clear_sizes(self) -> None:
+        """Forget the measured sizes, without reloading anything from disk."""
+        if self._inventory is None:
+            return
+
+        inventory = self._inventory.replace_rows(
+            row.with_size(None) for row in self._inventory.rows
+        )
+        self._inventory = inventory
+        self.model.set_inventory(inventory)
+        self._update_summary()
 
     # -- actions -------------------------------------------------------
 
@@ -498,13 +590,13 @@ class PackagesView(QWidget):
                 Path(request.location).expanduser(),
                 interpreter=Path(request.interpreter) if request.interpreter else None,
                 cancel=cancel,
-                on_progress=self.run_line.emit,
+                on_progress=lambda line: emit_if_alive(self.run_line, line),
             )
 
         self._create_task = self._context.tasks.schedule(
             label,
             work,
-            on_finish=lambda _task_id, result: self.create_finished.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.create_finished, result),
         )
 
     def _on_create_finished(self, result: TaskResult) -> None:
@@ -531,8 +623,10 @@ class PackagesView(QWidget):
             # to it rather than making the user find it in the switcher.
             self._context.set_default_environment(created.prefix)
             self._environment = Path(created.prefix)
-            self._service = None
-            self.refresh()
+            # Any refresh still running belongs to the environment this one
+            # replaces; letting it finish would paint the old environment's
+            # packages over the new one's table, so it is stopped first.
+            self._refresh_after_change()
             return
 
         cancelled = created.result.cancelled
@@ -610,20 +704,131 @@ class PackagesView(QWidget):
             self.toast.emit(message, ToastKind.ERROR)
             return False
 
-        if policy.requires_confirmation:
+        # A backend that writes only the environment's own site-packages
+        # (uv) cannot change a package whose imported copy lives in the user
+        # site: the command would exit 0 and change nothing the user - or the
+        # table - can see. Rather than refuse, the same action is offered
+        # through pip: the one backend that reaches the shadowing copy, with
+        # no administrator privileges involved. The offer is a real
+        # confirmation showing pip's own exact command (SPEC section 11.7) -
+        # the backend is never substituted silently.
+        if not service.backend_can_reach_targets(action):
+            return self._confirm_fallback_with_pip(action, policy)
+
+        # The one case elevation exists for: a backend with no user-site path
+        # of its own, asked to write an environment the current user may not
+        # change. The OS's consent prompt - not this dialog - is what grants
+        # the privileges; this decision is only whether to ask for them, and
+        # a system that cannot is refused before the user confirms anything.
+        needs_elevation = service.backend_needs_elevation(action)
+        if needs_elevation and not elevation_supported():
+            message = self._shell.text(
+                TranslationKey.ELEVATION_UNAVAILABLE, backend=service.backend_name
+            )
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.INFO)
+            return False
+
+        # ``or needs_elevation``: elevation is confirmed even when the policy
+        # alone would not ask, because a run with the OS's help must never be
+        # consented to silently (SPEC section 11.5).
+        if policy.requires_confirmation or needs_elevation:
             dialog = ConfirmationDialog(
                 plan=plan,
                 policy=policy,
                 translator=self._shell.translator,
+                elevation=(
+                    ElevationNotice(backend=service.backend_name) if needs_elevation else None
+                ),
                 parent=self,
             )
             if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
                 return False
 
-        self._run_plan(plan)
+        self._run_plan(plan, elevated=needs_elevation, meta=self._record_action_context(plan))
         return True
 
-    def _run_plan(self, plan: CommandPlan) -> None:
+    def _confirm_fallback_with_pip(self, action: PackageAction, policy: ModificationPolicy) -> bool:
+        """Offer the same action through pip, the backend that can actually run it.
+
+        The reachability refusal is not "this action cannot happen" - pip can
+        upgrade the shadowing copy in the user site, as a normal user - it is
+        "the chosen backend cannot run it usefully". So the refusal becomes an
+        offer: the identical action, re-planned through pip, shown with pip's
+        own exact command and confirmed like any other changing action.
+
+        ``--user`` is part of the rebuilt request for install-style actions:
+        the copy that needs changing is in the user site, and pointing pip at
+        it explicitly is what guarantees the upgrade lands there - pip's
+        automatic fallback would do the same only for as long as the system
+        site-packages stays unwritable. Uninstalling has no ``--user`` (pip
+        identifies the distribution by name and removes the copy the
+        interpreter actually imports), so the request passes through as is.
+        """
+        if action.kind is not ActionKind.UNINSTALL:
+            action = replace(action, user=True)
+
+        try:
+            plan = self.service.plan_with_backend("pip", action)
+        except BackendError as error:
+            message = str(error)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return False
+
+        dialog = ConfirmationDialog(
+            plan=plan,
+            policy=policy,
+            translator=self._shell.translator,
+            fallback=FallbackNotice(replaced=self.service.backend_name),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
+            return False
+
+        self._run_plan(plan, meta=self._record_action_context(plan))
+        return True
+
+    def _record_action_context(self, plan: CommandPlan) -> dict[str, object]:
+        """Record what an approved action is about to change, for the undo.
+
+        SPEC section 4: an automatic snapshot before every risky or bulk
+        action. Every changing action gets one here - the file is a few
+        kilobytes, and it is what lets the History page offer to put the
+        exact versions back for *any* of them, an uninstall included.
+
+        The snapshot is bookkeeping, never a veto: if it cannot be written the
+        action still runs, and the undo for it is simply not offered.
+        """
+        meta: dict[str, object] = {
+            "kind": plan.action.kind.value,
+            "names": sorted(action_target_names(plan.action)),
+            "environment": str(self._environment),
+        }
+
+        rows = self._inventory.rows if self._inventory is not None else ()
+        if rows:
+            try:
+                snapshot = self._snapshots.capture(
+                    self._environment,
+                    [(row.name, row.installed) for row in rows],
+                    automatic=True,
+                    reason=plan.display_command(),
+                )
+            except OSError:
+                snapshot = None
+            if snapshot is not None:
+                meta["snapshot"] = snapshot.id
+
+        return meta
+
+    def _run_plan(
+        self,
+        plan: CommandPlan,
+        *,
+        elevated: bool = False,
+        meta: dict[str, object] | None = None,
+    ) -> None:
         """Run a confirmed plan on a worker thread, streaming its output.
 
         For install-style actions the backend may supply a download pre-step that
@@ -631,12 +836,20 @@ class PackagesView(QWidget):
         That is what lets a package manager be upgraded without trying to replace the
         process that is currently running it: the new wheels are downloaded first,
         then the install runs from the cache.
+
+        An elevated run is the one exception to "streaming its output": the OS's
+        consent boundary carries no pipes, so the log says so up front and the
+        result arrives when the command ends. ``meta`` is recorded on the task
+        result for the History page: what ran, against what names, and the
+        snapshot taken before it.
         """
         if self._run_task:
             return
 
         self._log.begin_run(plan.label)
         self._log.append_line(f"$ {plan.display_command()}")
+        if elevated:
+            self._log.append_line(self._shell.text(TranslationKey.ELEVATION_NO_OUTPUT))
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> CommandResult:
             service = self._context.service_for(self._environment)
@@ -644,19 +857,183 @@ class PackagesView(QWidget):
 
             preplan = backend.download_plan(plan.action)
             if preplan is not None:
-                self.run_line.emit(":: downloading prerequisites ::")
-                self.run_line.emit(f"$ {preplan.display_command()}")
-                pre_result = service.execute(preplan, cancel=cancel, on_line=self.run_line.emit)
+                emit_if_alive(self.run_line, ":: downloading prerequisites ::")
+                emit_if_alive(self.run_line, f"$ {preplan.display_command()}")
+                pre_result = service.execute(
+                    preplan, cancel=cancel, on_line=lambda line: emit_if_alive(self.run_line, line)
+                )
                 if not pre_result.ok and not cancel.is_set():
                     return pre_result
 
-            return service.execute(plan, cancel=cancel, on_line=self.run_line.emit)
+            return service.execute(
+                plan,
+                cancel=cancel,
+                on_line=lambda line: emit_if_alive(self.run_line, line),
+                elevated=elevated,
+            )
 
         self._run_task = self._context.tasks.schedule(
             plan.label,
             work,
-            on_finish=lambda _task_id, result: self.run_finished.emit(result),
+            meta=meta,
+            on_finish=lambda _task_id, result: emit_if_alive(self.run_finished, result),
         )
+
+    # -- restores, rollbacks and undo -----------------------------------
+
+    def run_confirmed_plans(self, plans: Sequence[tuple[CommandPlan, bool]]) -> None:
+        """Run already-confirmed plans one after another.
+
+        A restore is one decision that can be two commands: put the recorded
+        versions back, and remove what arrived since. The preview the user
+        approved showed every command (SPEC section 11.7), so nothing here
+        asks again - they run in order, one undo snapshot taken for the
+        whole batch before the first of them starts.
+        """
+        batch = [entry for entry in plans if entry[0]]
+        if not batch:
+            return
+
+        meta = self._record_action_context(batch[0][0])
+        self._plan_queue.extend(batch)
+
+        # The first plan may start only when nothing else is running; the
+        # rest follow in ``_on_run_finished`` as each one completes.
+        if not self._run_task:
+            plan, elevated = self._plan_queue.pop(0)
+            self._run_plan(plan, elevated=elevated, meta=meta)
+
+    def _start_next_confirmed_plan(self) -> None:
+        if self._run_task or not self._plan_queue:
+            return
+        plan, elevated = self._plan_queue.pop(0)
+        self._run_plan(plan, elevated=elevated)
+
+    def restore_snapshot(
+        self,
+        environment: str,
+        snapshot_id: str,
+        *,
+        names: Sequence[str] | None = None,
+        empty_key: TranslationKey = TranslationKey.RESTORE_EMPTY,
+    ) -> None:
+        """Put a recorded state back, after a preview of every command it takes.
+
+        With *names* the restore is an undo: only the packages the recorded
+        action touched are considered. Without them it is a full rollback of
+        the environment to the snapshot.
+
+        The plans are built before the preview so it can show the exact
+        commands (SPEC section 11.7), and the backend that runs them is chosen
+        the same way a toolbar action chooses: when the default manager
+        cannot reach the packages being restored - the user-site shadowing
+        case - pip plans them instead.
+        """
+        snapshot = self._snapshots.load(environment, snapshot_id)
+        if snapshot is None:
+            self._report_restore_refusal(empty_key)
+            return
+
+        inventory = self._inventory
+        if inventory is None or not inventory.rows:
+            self._report_restore_refusal(TranslationKey.RESTORE_NOT_READY)
+            self.refresh()
+            return
+
+        installed = [(row.name, row.installed) for row in inventory.rows]
+        diff = self._snapshots.diff(snapshot, installed)
+
+        if names is not None:
+            wanted = {normalize_name(name) for name in names}
+            removed = tuple(row for row in diff.removed if row[0] in wanted)
+            changed = tuple(row for row in diff.changed if row[0] in wanted)
+            remove = tuple(name for name in diff.added if name in wanted)
+        else:
+            removed = diff.removed
+            changed = diff.changed
+            remove = diff.added
+
+        if not removed and not changed and not remove:
+            self._report_restore_refusal(empty_key)
+            return
+
+        restore = restore_specs(SnapshotDiff(removed=removed, added=(), changed=changed))
+        plans: list[tuple[CommandPlan, bool]] = []
+
+        try:
+            if remove:
+                plans.append(self._planned_action(self.service.action_for_uninstall_many(remove)))
+            if restore:
+                plans.append(self._planned_action(self.service.action_for_restore(restore)))
+        except (BackendError, ValidationError) as error:
+            self.status_changed.emit(str(error))
+            self.toast.emit(str(error), ToastKind.ERROR)
+            return
+
+        elevated = any(flag for _plan, flag in plans)
+        dialog = RollbackPreviewDialog(
+            restore_specs=restore,
+            remove_names=remove,
+            commands=tuple(plan.display_command() for plan, _flag in plans),
+            elevated=elevated,
+            translator=self._shell.translator,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
+            return
+
+        self.run_confirmed_plans(plans)
+
+    def undo_action(self, meta: dict[str, object]) -> None:
+        """Reverse one recorded action, using the snapshot it was preceded by.
+
+        The undo is the restore narrowed to the action's own packages:
+        whatever the snapshot recorded for those names that no longer matches
+        comes back, and what the action installed goes. Without a snapshot -
+        or with nothing left to reverse - the entry simply explains that.
+        """
+        raw_names = cast("Sequence[str]", meta.get("names") or ())
+        names = tuple(str(name) for name in raw_names)
+        snapshot_id = str(meta.get("snapshot") or "")
+        environment = str(meta.get("environment") or "")
+
+        if not names or not snapshot_id:
+            self._report_restore_refusal(TranslationKey.HISTORY_UNDO_UNAVAILABLE)
+            return
+
+        self.restore_snapshot(
+            environment,
+            snapshot_id,
+            names=names,
+            empty_key=TranslationKey.HISTORY_UNDO_UNAVAILABLE,
+        )
+
+    def _planned_action(self, action: PackageAction) -> tuple[CommandPlan, bool]:
+        """Plan *action* through whichever backend can actually reach it.
+
+        The reachability rule of a toolbar action, applied to restores: the
+        default manager plans unless the targets resolve from somewhere it
+        cannot write, in which case pip plans and no elevation is involved.
+        The bool is the elevation the plan would need, mirroring what
+        ``confirm_and_run`` decides for a single action.
+        """
+        service = self.service
+        if not service.backend_can_reach_targets(action):
+            return service.plan_with_backend("pip", action), False
+
+        elevated = service.backend_needs_elevation(action)
+        if elevated and not elevation_supported():
+            # Refuse the same way a confirmed action would: better a clear
+            # status line than a plan that cannot run on this system.
+            raise BackendError(
+                self._shell.text(TranslationKey.ELEVATION_UNAVAILABLE, backend=service.backend_name)
+            )
+        return service.plan(action), elevated
+
+    def _report_restore_refusal(self, key: TranslationKey) -> None:
+        message = self._shell.text(key)
+        self.status_changed.emit(message)
+        self.toast.emit(message, ToastKind.INFO)
 
     def _on_run_finished(self, result: TaskResult) -> None:
         self._run_task = ""
@@ -669,13 +1046,40 @@ class PackagesView(QWidget):
         if outcome is not RunOutcome.DONE:
             self.status_changed.emit(error)
             self.toast.emit(error or self._shell.text(TranslationKey.TOAST_FAILED), ToastKind.ERROR)
-            self.refresh()
+            # A failed or cancelled step stops the batch it belonged to: the
+            # plans behind it were approved as one decision, and running the
+            # rest anyway would be executing half of what was confirmed.
+            self._plan_queue.clear()
+            # A failed run may still have changed something before it failed;
+            # whatever it left behind is what the next pass has to report.
+            self._refresh_after_change()
             return
 
         self.toast.emit(self._shell.text(TranslationKey.LOG_DONE), ToastKind.SUCCESS)
-        # The environment changed, so both the metadata index and the inventory
-        # are stale: the next refresh recomputes them.
+        # The environment changed, so both the inventory and the metadata index
+        # are stale. The index has to be invalidated on the *service* rather than
+        # on this view: it is cached per environment and the detail panel, the
+        # dependency graph and the size pass all read the cached copy, which is
+        # why a package could be upgraded and still be described by its old
+        # metadata everywhere except the packages table.
+        self.service.invalidate_metadata()
         self._index = None
+        self._refresh_after_change()
+        self._start_next_confirmed_plan()
+
+    def _refresh_after_change(self) -> None:
+        """Reload now that the environment changed, overtaking a stale pass.
+
+        A refresh that is still running read the environment *before* the
+        change, so waiting it out only delays the answer the user is looking
+        at the table for - an upgrade that finished behind a big, slow pass
+        could leave the old version on screen for minutes. The stale pass is
+        cancelled instead; the pending-refresh mechanism then starts the fresh
+        one the moment the old pass stops, and its partial results are replaced
+        by the new listing before anyone can mistake them for current.
+        """
+        if self._refresh_task:
+            self._context.tasks.cancel(self._refresh_task)
         self.refresh()
 
     # ---- installation / uninstall / upgrade actions --------------------------------
@@ -689,9 +1093,7 @@ class PackagesView(QWidget):
                 self.toast.emit(self._shell.text(TranslationKey.LOG_EMPTY), ToastKind.INFO)
                 return
             self.confirm_and_run(
-                self.service.action_for_upgrade_all(
-                    self._inventory, user=self._may_use_user_flag()
-                )
+                self.service.action_for_upgrade_all(self._inventory, user=self._may_use_user_flag())
             )
             return
 
@@ -817,6 +1219,21 @@ class PackagesView(QWidget):
         self.empty_label.setText(message)
         self.empty_label.setVisible(bool(message))
         self.table.setVisible(bool(self._inventory and self._inventory.rows))
+
+    def _on_listed(self, inventory: Inventory) -> None:
+        """Show what is installed the moment the listing exists.
+
+        Listing is local and fast; the latest versions behind it are not. Filling
+        the table here is what makes a refresh feel immediate - the packages are
+        on screen while the index lookups catch up, instead of an empty table
+        behind a spinner until the slowest of them answers.
+        """
+        self._inventory = inventory
+        self.model.set_inventory(inventory)
+        self._update_summary()
+        self._update_empty_state()
+        self._update_buttons()
+        self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_LOADING_LATEST))
 
     def _on_row_updated(self, row: PackageRow) -> None:
         """A single package finished resolving; update just that row."""

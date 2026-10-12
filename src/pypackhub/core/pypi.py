@@ -271,28 +271,82 @@ class PyPIClient:
         return sorted(versions, reverse=True)
 
 
-def _latest_version(version: str, payload: Any) -> str:
-    if version:
-        return version
+def _is_prerelease(version: str) -> bool:
+    """True when *version* is an rc/beta/dev that an ordinary upgrade skips.
 
+    ``pip install --upgrade`` and ``uv pip install --upgrade`` never move to a
+    pre-release unless ``--pre`` is passed, so a pre-release is not a version
+    any upgrade this application offers can reach.
+    """
+    if not version:
+        return False
+
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        return Version(version).is_prerelease
+    except InvalidVersion:
+        return False
+
+
+def _release_files(files: Any) -> list[Any]:
+    """The files of one release that pip would actually consider installing.
+
+    A release with no files, or whose every file is yanked, is not a candidate:
+    the resolver skips it, so "latest" must skip it too - a yanked or empty
+    release is the same dead end a pre-release is.
+    """
+    if not isinstance(files, list):
+        return []
+
+    usable = [entry for entry in files if isinstance(entry, dict) and not entry.get("yanked")]
+    return usable
+
+
+def _latest_version(version: str, payload: Any) -> str:
+    """The version an ordinary ``pip install --upgrade`` would move to.
+
+    PyPI's JSON document reports its newest *upload* at the top level -
+    pre-release included - so taking that field at face value is how a package
+    sits "outdated" forever: the badge points at ``3.1.0rc0`` while the upgrade
+    command - correctly - installs nothing, and the row never turns green no
+    matter how many times the user upgrades.
+
+    The answer is therefore picked from the releases the way the resolver
+    picks candidates: the newest **stable** release that has at least one
+    un-yanked file. Only when a project has published nothing but pre-releases
+    is the newest of those returned; a project that only ever published
+    pre-releases has no "latest" an upgrade could reach.
+    """
     releases = payload.get("releases")
     if not isinstance(releases, Mapping):
-        return ""
+        # No list to reason over, so the top-level version is all there is.
+        # Believe it only when it is something an upgrade could install.
+        return "" if _is_prerelease(version) else version
 
-    from packaging.version import InvalidVersion as PackagingInvalidVersion
-    from packaging.version import Version as PackagingVersion
+    from packaging.version import InvalidVersion, Version
 
-    candidates: list[PackagingVersion] = []
-    for raw_version in releases:
+    stable: list[Version] = []
+    any_release: list[Version] = []
+    for raw_version, files in releases.items():
         try:
-            candidates.append(PackagingVersion(raw_version))
-        except PackagingInvalidVersion:
+            parsed = Version(raw_version)
+        except InvalidVersion:
             continue
+        if not _release_files(files):
+            continue
+        any_release.append(parsed)
+        if not parsed.is_prerelease:
+            stable.append(parsed)
 
-    if not candidates:
-        return ""
+    if stable:
+        return str(max(stable))
+    if any_release:
+        return str(max(any_release))
 
-    return str(max(candidates))
+    # Nothing with a usable file at all; the top-level version is the last
+    # resort, and only when it is not a dead end itself.
+    return "" if _is_prerelease(version) else version
 
 
 def pypi_info(package: str, *, http: HttpClient | None = None) -> PackageInfo:

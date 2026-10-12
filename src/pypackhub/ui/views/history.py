@@ -1,183 +1,196 @@
-"""History view for PyPackHub.
+"""The history view: what ran, when, and - when possible - take it back.
 
-This module renders the history page showing a list of past package management
-actions with their status, time, and details.
+The task manager records every changing action the packages view runs: the
+command, the outcome, the moment it finished, and the context the view
+attached - the action's kind, the packages it touched, and the automatic
+snapshot taken before it. This page lists those records; selecting one shows
+its exact command, and offers the undo when there is one to offer.
+
+Undo is not a re-run of the reverse command: it is the snapshot the action
+was preceded by, narrowed to the action's own packages, applied through the
+same preview-and-confirm path as every other bulk change. An uninstall is
+therefore as reversible as an upgrade - the versions to put back were
+recorded before anything was removed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from pypackhub.core.runner import CommandResult
+from pypackhub.core.tasks import JobState, TaskResult
 from pypackhub.ui.i18n.translations import TranslationKey
-from pypackhub.ui.i18n.translator import Translator
+from pypackhub.ui.services import UiContext
+from pypackhub.ui.views.window_shell import WindowShell
+from pypackhub.ui.widgets.toast import ToastKind
+
+__all__ = ["HistoryEntryItem", "HistoryView"]
+
+#: The states a finished action can be shown in, with their badge words.
+_STATE_KEYS = {
+    JobState.FINISHED: TranslationKey.HISTORY_SUCCESS,
+    JobState.FAILED: TranslationKey.HISTORY_FAILED,
+    JobState.CANCELLED: TranslationKey.HISTORY_CANCELLED,
+}
 
 
-class HistoryEntry(Protocol):
-    """A protocol for history entry data."""
+class HistoryEntryItem(QListWidgetItem):
+    """One recorded action, carrying its task result and undo context."""
 
-    name: str
-    version: str
-    action: str
-    timestamp: datetime
-    status: str
-    environment: str
-
-
-@dataclass
-class HistoryItem:
-    """A history item for display."""
-
-    name: str
-    version: str
-    action: str
-    timestamp: datetime
-    status: str
-    environment: str
-
-    def __hash__(self) -> int:
-        return hash((self.name, self.version, self.action, self.timestamp))
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, HistoryItem):
-            return False
-        return (
-            self.name == other.name
-            and self.version == other.version
-            and self.action == other.action
-            and self.timestamp == other.timestamp
-        )
+    def __init__(self, result: TaskResult, text: str) -> None:
+        super().__init__()
+        self.result = result
+        self.setText(text)
 
 
 class HistoryView(QWidget):
-    """A history widget showing past package management actions."""
+    """The changing actions that ran, newest first, with undo where it exists."""
 
-    # Emitted when user selects a history item
-    selection_changed = Signal(object)
+    #: The task context of the selected action (the ``meta`` the packages
+    #: view recorded). The window routes it to the packages view, which
+    #: previews and confirms the restore.
+    undo_requested = Signal(object)
+    status_changed = Signal(str)
+    toast = Signal(str, object)
 
     def __init__(
         self,
         *,
-        translator: Translator,
+        context: UiContext,
+        shell: WindowShell,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._translator = translator
-        self._entries: list[HistoryItem] = []
-        self._selected_item: HistoryItem | None = None
+        self._context = context
+        self._shell = shell
 
         self.setObjectName("historyPanel")
-        self.setMinimumWidth(400)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        # Header
-        self._title_label = QLabel(self)
-        self._title_label.setObjectName("pageTitle")
-        self._title_label.setText(translator.translate(TranslationKey.HISTORY_TITLE))
-        layout.addWidget(self._title_label)
+        self.title_label = QLabel(self)
+        self.title_label.setObjectName("pageTitle")
+        layout.addWidget(self.title_label)
 
-        # Actions label
-        self._actions_label = QLabel(self)
-        self._actions_label.setObjectName("secondaryText")
-        self._actions_label.setText(translator.translate(TranslationKey.HISTORY_ACTIONS))
-        layout.addWidget(self._actions_label)
+        self.intro_label = QLabel(self)
+        self.intro_label.setObjectName("secondaryText")
+        self.intro_label.setWordWrap(True)
+        layout.addWidget(self.intro_label)
 
-        # History list
-        self._history_list = QListWidget(self)
-        self._history_list.setObjectName("historyList")
-        layout.addWidget(self._history_list)
+        controls = QHBoxLayout()
+        self.refresh_button = QPushButton(self)
+        self.refresh_button.clicked.connect(self.refresh)
+        controls.addWidget(self.refresh_button)
 
-        # Status for empty state
-        self._empty_label = QLabel(self)
-        self._empty_label.setObjectName("secondaryText")
-        self._empty_label.setText(translator.translate(TranslationKey.HISTORY_NO_ACTIONS))
-        self._empty_label.setVisible(False)
-        layout.addWidget(self._empty_label)
+        self.undo_button = QPushButton(self)
+        self.undo_button.setObjectName("primaryButton")
+        self.undo_button.setEnabled(False)
+        self.undo_button.clicked.connect(self._undo_selected)
+        controls.addWidget(self.undo_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
 
-        # Connect selection changes
-        self._history_list.itemSelectionChanged.connect(self._on_selection_changed)
+        self.history_list = QListWidget(self)
+        self.history_list.setObjectName("historyList")
+        self.history_list.itemSelectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self.history_list, 1)
 
-    def _on_selection_changed(self) -> None:
-        """Handle selection change in history list."""
-        selected = self._history_list.selectedItems()
-        if selected:
-            item = selected[0]
-            self._selected_item = item.data(Qt.ItemDataRole.UserRole)
-            self.selection_changed.emit(self._selected_item)
-        else:
-            self._selected_item = None
-            self.selection_changed.emit(None)
+        self.empty_label = QLabel(self)
+        self.empty_label.setObjectName("emptyStateBody")
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
 
-    def set_entries(self, entries: list[HistoryItem]) -> None:
-        """Set the history entries to display."""
-        self._history_list.clear()
-        self._entries = entries
+        self.retranslate()
 
-        if not entries:
-            self._empty_label.setVisible(True)
-            self._history_list.setVisible(False)
-        else:
-            self._empty_label.setVisible(False)
-            self._history_list.setVisible(True)
-
-            for entry in entries:
-                item = QListWidgetItem()
-                item.setText(f"{entry.action} {entry.name} ({entry.version})")
-                item.setToolTip(
-                    f"{entry.action} {entry.name} ({entry.version})\n"
-                    f"Environment: {entry.environment}\n"
-                    f"Time: {entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"Status: {entry.status}"
-                )
-                item.setData(Qt.ItemDataRole.UserRole, entry)
-                self._history_list.addItem(item)
-
-    def set_loading(self, loading: bool) -> None:
-        """Set loading state."""
-        if loading:
-            self._history_list.clear()
-            self._empty_label.setText(self._translator.translate(TranslationKey.HISTORY_NO_ACTIONS))
-            self._empty_label.setVisible(True)
-
-    def clear(self) -> None:
-        """Clear all history entries."""
-        self._history_list.clear()
-        self._entries.clear()
-        self._selected_item = None
-        self._empty_label.setVisible(True)
-
-    def retranslate(self, translator: Translator) -> None:
-        """Re-render strings after language switch."""
-        self._translator = translator
-        self._title_label.setText(translator.translate(TranslationKey.HISTORY_TITLE))
-        self._actions_label.setText(translator.translate(TranslationKey.HISTORY_ACTIONS))
-        self._empty_label.setText(translator.translate(TranslationKey.HISTORY_NO_ACTIONS))
-
-        # Update tooltips for existing items
-        for i in range(self._history_list.count()):
-            item = self._history_list.item(i)
-            entry = item.data(Qt.ItemDataRole.UserRole)
-            if entry:
-                item.setToolTip(
-                    f"{entry.action} {entry.name} ({entry.version})\n"
-                    f"Environment: {entry.environment}\n"
-                    f"Time: {entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"Status: {entry.status}"
-                )
+    # -- listing --------------------------------------------------------
 
     def refresh(self) -> None:
-        """Refresh the history view."""
-        self.clear()
+        """Re-render the recorded actions from the task manager's history."""
+        entries = [
+            result
+            for result in reversed(self._context.tasks.history())
+            if isinstance(result.payload, CommandResult)
+        ]
+
+        self.history_list.clear()
+
+        if not entries:
+            self.empty_label.setText(self._shell.text(TranslationKey.HISTORY_NO_ACTIONS))
+            self.empty_label.setVisible(True)
+            self.history_list.setVisible(False)
+        else:
+            self.empty_label.setVisible(False)
+            self.history_list.setVisible(True)
+            for result in entries:
+                self.history_list.addItem(HistoryEntryItem(result, self._row_text(result)))
+
+        self._on_selection_changed()
+
+    def _row_text(self, result: TaskResult) -> str:
+        when = (
+            datetime.fromtimestamp(result.timestamp).strftime("%H:%M:%S")
+            if result.timestamp
+            else ""
+        )
+        state_key = _STATE_KEYS.get(result.state, TranslationKey.HISTORY_STATUS)
+        outcome = self._shell.text(state_key)
+        names = result.meta.get("names") or []
+        targets = ", ".join(str(name) for name in names)
+        kind = str(result.meta.get("kind", "")).strip()
+        label = f"{kind}: {targets}" if kind else result.error or outcome
+        return f"{when} — {label} — {outcome}"
+
+    # -- the selected action -------------------------------------------
+
+    def _selected_result(self) -> TaskResult | None:
+        selected = self.history_list.selectedItems()
+        if not selected or not isinstance(selected[0], HistoryEntryItem):
+            return None
+        return selected[0].result
+
+    def _on_selection_changed(self) -> None:
+        result = self._selected_result()
+        undoable = result is not None and bool(result.meta.get("snapshot"))
+        self.undo_button.setEnabled(undoable)
+
+    def _undo_selected(self) -> None:
+        """Ask for the restore; the packages view previews and confirms it."""
+        result = self._selected_result()
+        if result is None:
+            return
+
+        if not result.meta.get("snapshot"):
+            message = self._shell.text(TranslationKey.HISTORY_UNDO_UNAVAILABLE)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.INFO)
+            return
+
+        self.undo_requested.emit(result.meta)
+
+    # -- chrome --------------------------------------------------------
+
+    def retranslate(self) -> None:
+        shell = self._shell
+        self.title_label.setText(shell.text(TranslationKey.HISTORY_TITLE))
+        self.intro_label.setText(shell.text(TranslationKey.HISTORY_INTRO))
+        self.refresh_button.setText(shell.text(TranslationKey.SNAPSHOTS_REFRESH))
+        self.undo_button.setText(shell.text(TranslationKey.HISTORY_UNDO))
+        self.empty_label.setText(shell.text(TranslationKey.HISTORY_NO_ACTIONS))
+
+        for row in range(self.history_list.count()):
+            item = self.history_list.item(row)
+            if isinstance(item, HistoryEntryItem):
+                item.setText(self._row_text(item.result))

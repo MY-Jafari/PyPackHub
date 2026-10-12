@@ -47,9 +47,14 @@ nothing here is available as a release yet. This table is kept honest on purpose
 | Settings page, PEP 668 "create a virtual environment" flow | ✅ done (section 5) |
 | Dependency graph, reverse dependencies, unneeded-package clean-up with a preview | ✅ done (section 6) |
 | Environments page (discover and switch) | ✅ done (section 7, in progress) |
+| Dashboard: packages, outdated, orphans, vulnerable, measured size, purpose guess | ✅ done |
+| Search: ranked against a bundled catalogue and the live PyPI index, with a version picker | ✅ done |
+| Security: user-initiated vulnerability scanning against OSV.dev, one-click fix | ✅ done |
+| Snapshots: automatic before every change, rollback with a preview diff | ✅ done |
+| History: every recorded action, undoable through its snapshot | ✅ done |
+| uv on all-users Pythons: per-action administrator prompts, pip offered when the user site shadows the target | ✅ done |
 | Stand-alone installers for Windows, Linux and macOS, plus automatic releases | ✅ done (publishes when a `v*` tag is pushed) |
-| Dashboard totals, PyPI browsing, trust and supply chain, disk usage | 🚧 phase 2 |
-| Security scanning, snapshots, history | 📋 later phases |
+| Trust panel and typosquatting warnings, import/export, conflict checks, disk-usage analysis | 📋 later phases |
 | conda/mamba, poetry, pipx, pipenv and pdm backends | 📋 later phases |
 
 The full plan, the phase breakdown and every decision taken so far live in
@@ -120,7 +125,9 @@ leaves your data alone.
 The bundle is built `universal2` where the toolchain allows it, so one file runs
 on Apple Silicon and on Intel. Gatekeeper may ask you to right-click → Open the
 first time, because the release is not notarized — that is a signing cost, not a
-build setting.## Running from source
+build setting.
+
+## Running from source
 
 To hack on PyPackHub rather than use it, work from a checkout. Python 3.10–3.14
 is required (PySide6 does not support anything older).
@@ -146,10 +153,17 @@ python -m pypackhub # the same entry point, without relying on PATH
 ## Using it
 
 The window opens on the **Dashboard**, and the sidebar on the left reaches every
-other screen. The working screens in this build are **Packages**, **Environments**
-and **Dependencies**; the rest describe the phase that will build them, so where a
-feature will live is never a surprise.
+other screen. Every screen is functional in this build — the ones that change
+an environment share one confirmation path, and the ones that only *look* keep
+their answers on screen rather than re-fetching them behind your back.
 
+* **Dashboard** answers six questions about the current environment: how many
+  packages are installed, how many are behind the index, how many nothing
+  needs (orphans, from the dependency graph), how many the last security scan
+  found affected, how much measured space they take up, and what the
+  environment is probably *for* — a deterministic guess from the packages it
+  carries, shown with the last scan's time so a stale number can be recognised
+  as one.
 * **Packages** lists what is installed, with the status, the version and (once
   measured) the size of each package. Search filters the table, the *outdated*
   check narrows it to packages behind the index, and the columns sort. A refresh
@@ -159,16 +173,40 @@ feature will live is never a surprise.
   one is, and lets you switch to it with one click. Switching also moves the
   package table and the top-bar selector, so the whole window agrees on one
   "current" environment.
+* **Search** finds packages on PyPI: the query is ranked against a bundled
+  popular-package catalogue and resolved against the live index, several
+  lookups at a time, with results filling in as they arrive. Selecting a result
+  fetches its release history, so you can install the latest or pin an exact
+  version you picked — through the same confirmation as every other action.
 * **Changing something** — install, uninstall, upgrade, downgrade, upgrade all —
   goes through one path: the plan is built, the platform guard decides whether the
   environment may be changed at all, and a confirmation shows the *exact* command
-  and the environment it targets before anything runs. Nothing changes silently.
+  and the environment it targets before anything runs. Nothing changes silently,
+  and an automatic snapshot of the installed state is written first, so every
+  action is one you can undo.
 * **Dependencies** answers three questions in the order people ask them. Select a
   package and it says *why* it is installed — the chain of package names from the
   one you asked for down to this one, or plainly that nothing needs it — then shows
   what it requires and what requires it, both as trees, and flags anything it
   declares that is not installed. Below that it lists the packages nothing needs
   and you never asked for by name, and offers a **preview** before they go.
+* **Security** scans the installed packages against the [OSV.dev](https://osv.dev)
+  vulnerability database — only when you press the button, and sending only each
+  package's name and version, nothing else. Findings arrive live with their
+  severity, the version the issue is fixed in, and an advisory link that opens in
+  the system browser over HTTPS. **Upgrade to fix** is an ordinary upgrade with a
+  better reason: it goes through the same confirmation, snapshot and log as any
+  other.
+* **Snapshots** records the exact installed versions of the moment, as small
+  plain-JSON files under your application-data directory. **Roll back** shows a
+  preview of everything it would do — which packages come back at which recorded
+  versions, which ones arrived since and would be removed, and the exact commands
+  — and runs them as one confirmed batch.
+* **History** lists every changing action that ran, with its time, its packages
+  and its outcome. **Undo** puts back what the automatic snapshot (the one taken
+  before that action) remembers about that action's own packages — even an
+  uninstall, because the versions were recorded before anything was removed.
+  The undo is itself a restore, so it gets the same preview and confirmation.
 * **The log panel** at the bottom streams the command's own output as it runs, and
   its Cancel button stops the process tree — not just the process.
 * **Settings** edits the theme, the language, the table page size, the sidebar
@@ -189,6 +227,24 @@ says why. The dialog then offers the way out: **Create a virtual environment**,
 which builds one with `python -m venv`, streams the progress into the log panel
 where it can be cancelled, and switches the window to the new environment when it
 is done.
+
+### When uv needs the system's help
+
+pip and uv do not write to the same places. On an all-users Python (under
+`Program Files` on Windows, `/usr/lib` elsewhere) pip falls back to your *user
+site* — a directory every normal user may write — while uv only ever writes the
+environment's own site-packages, which there needs the OS's help:
+
+* The confirmation explains this and the button reads **Run as administrator**;
+  consenting runs that one command elevated, through the OS's own prompt (UAC on
+  Windows, `pkexec` on Linux). The request covers that action only — PyPackHub
+  itself never runs elevated, and nothing is remembered.
+* If the package you are changing is one your Python actually *imports* from the
+  user site — where pip put it, and which uv can never write — an elevated uv
+  would land where Python never looks. PyPackHub detects that before running
+  anything and offers the same action **through pip** instead, showing pip's own
+  exact command: pip upgrades the copy you actually use, as a normal user, with no
+  administrator prompt at all.
 
 ## Development
 
@@ -227,29 +283,33 @@ src/pypackhub/
     validation.py      # all external input is validated before it is used
     platform_guard.py  # system-interpreter and PEP 668 protection
     backends/          # one class per package manager, one shared interface
-    environments.py    # discovery, system info, virtual-environment creation
+    environments.py    # discovery, system info, virtual-environment creation, purpose inference
     inventory.py       # the installed packages of one environment
     metadata.py        # installed dist-info metadata and dependency data
     deps.py            # the dependency graph and clean-up built on it
     sizes.py           # disk usage of installed packages
-    pypi.py            # search, versions, metadata, TTL cache
+    pypi.py            # versions, metadata, TTL cache
+    search.py          # what to look up: bundled catalogue ranking + index resolution
+    security.py        # OSV.dev vulnerability scanning (name==version only)
+    snapshots.py       # environment snapshots, diffs and restore pins
     net.py             # HTTPS-only HTTP client
     secrets.py         # keychain access and log redaction
     settings.py        # the settings model and its validation
-    tasks.py           # job queue, cancel, progress, history
+    tasks.py           # job queue, cancel, progress, recorded history
   ui/            # PySide6 (Qt 6) presentation layer
     theme/             # design tokens, QSS generation, theme manager
     i18n/              # translation tables, translator, refusal reasons, RTL
     widgets/           # package table, detail panel, log panel, dialogs, toasts, spinner
-    views/             # window shell, main window, packages, environments, dependencies, settings
-  assets/        # bundled fonts and the application icon
+    views/             # window shell, main window, dashboard, packages, environments,
+                       # dependencies, search, security, snapshots, history, settings
+  assets/        # bundled fonts, the application icon, the popular-packages catalogue
 
 tests/           # unit tests, plus tests/security for the security guarantees
 ```
 
-`security.py` (vulnerability lookups), `trust.py` (typosquatting) and
-`snapshots.py` are planned but not written yet, so they are deliberately absent
-from the tree above rather than listed as if they existed.
+`trust.py` (typosquatting and supply-chain signals) is planned but not written
+yet, so it is deliberately absent from the tree above rather than listed as if
+it existed.
 
 Three rules hold the design together, and each is enforced by a test rather
 than by discipline:
@@ -270,6 +330,11 @@ everything that comes from outside the application, typosquatting and
 supply-chain warnings, read-only protection for system interpreters, HTTPS-only
 networking, credentials in the OS keychain, and redaction of secrets out of
 logs and diagnostics.
+
+The vulnerability scan obeys the same rules: it runs only when you ask for it,
+and it asks OSV.dev about installed `name==version` pairs and nothing else — no
+paths, no hostnames, no environment details — over the same HTTPS-only client
+every other network feature uses.
 
 Read [SECURITY.md](SECURITY.md) for the full model, including what is
 implemented today and how to report a vulnerability privately.
@@ -342,9 +407,14 @@ conda/mamba، poetry، pipx، pipenv و pdm ساخته شده است، تا دی
 | صفحهٔ تنظیمات، جریان «ساخت محیط مجازی» برای PEP 668 | ✅ انجام شده (بخش ۵) |
 | گراف وابستگی‌ها، وابستگی‌های معکوس، پاک‌سازی بسته‌های بی‌نیاز همراه با پیش‌نمایش | ✅ انجام شده (بخش ۶) |
 | صفحهٔ محیط‌ها (شناسایی و تغییر محیط) | ✅ انجام شده (بخش ۷، در جریان) |
+| داشبورد: بسته‌ها، به‌روزنشده‌ها، بی‌نیازها، آسیب‌پذیرها، اندازهٔ اندازه‌گیری‌شده، کاربرد محتمل | ✅ انجام شده |
+| جست‌وجو: رتبه‌بندی بر پایهٔ فهرست همراه و نمایهٔ زندهٔ PyPI، همراه با انتخابگر نسخه | ✅ انجام شده |
+| امنیت: بررسی آسیب‌پذیری با درخواست کاربر برابر OSV.dev، اصلاح یک‌کلیکی | ✅ انجام شده |
+| نقاط بازیابی: خودکار پیش از هر تغییر، بازگشت با پیش‌نمایش تفاوت‌ها | ✅ انجام شده |
+| تاریخچه: هر کار ضبط‌شده، واگردانی از طریق نقطهٔ بازیابی‌اش | ✅ انجام شده |
+| uv روی پایتون‌های همه‌کاربر: درخواست دسترسی مدیریتی برای هر کار، و پیشنهاد pip وقتی site کاربر هدف را سایه می‌اندازد | ✅ انجام شده |
 | برنامه‌های نصبی ویندوز، لینوکس و مک به‌همراه انتشار خودکار | ✅ انجام شده (با زدن برچسب `v*` منتشر می‌شود) |
-| جمع‌بندی داشبورد، مرور PyPI، اعتماد و زنجیرهٔ تأمین، مصرف دیسک | 🚧 فاز ۲ |
-| بررسی امنیتی، نقاط بازیابی، تاریخچه | 📋 فازهای بعدی |
+| پنل اعتماد و هشدارهای شبیه‌سازی نام، درون‌ریزی/برون‌ریزی، بررسی تعارض، تحلیل مصرف دیسک | 📋 فازهای بعدی |
 | پشتیبان‌های conda/mamba، poetry، pipx، pipenv و pdm | 📋 فازهای بعدی |
 
 برنامهٔ کامل، تقسیم‌بندی فازها و همهٔ تصمیم‌های گرفته‌شده در
@@ -443,10 +513,16 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
 ## استفاده
 
 پنجره روی **داشبورد** باز می‌شود و نوار کناری سمت چپ به همهٔ صفحه‌های دیگر
-می‌رسد. صفحه‌های فعال در این نسخه **بسته‌ها**، **محیط‌ها** و **وابستگی‌ها**
-هستند؛ باقی صفحه‌ها فازی را نام می‌برند که آن‌ها را می‌سازد، تا اینکه هر قابلیت
-کجا زندگی خواهد کرد هرگز غافلگیرکننده نباشد.
+می‌رسد. در این نسخه همهٔ صفحه‌ها کار می‌کنند — صفحه‌هایی که محیط را تغییر
+می‌دهند یک مسیر تأیید مشترک دارند و صفحه‌هایی که فقط «می‌بینند» پاسخ‌هایشان
+را روی صفحه نگه می‌دارند و پشتِ سرِ شما دوباره چیزی نمی‌گیرند.
 
+* **داشبورد** شش پرسش دربارهٔ محیط فعلی را پاسخ می‌دهد: چند بسته نصب است،
+  چند بسته از نمایه عقب است، چند بسته را هیچ‌چیز لازم ندارد (بی‌نیازها، از
+  گراف وابستگی)، چند بسته در آخرین بررسی امنیتی آسیب‌پذیر پیدا شد، چند فضا
+  اندازه‌گیری‌شده گرفته‌اند، و این محیط احتمالاً برای چیست — حدسی قطعی از
+  روی بسته‌هایش، همراه با زمان آخرین بررسی تا پاسخ کهنه به‌عنوان کهنه شناخته
+  شود.
 * **بسته‌ها** آنچه نصب است را همراه با وضعیت، نسخه و (پس از اندازه‌گیری) اندازهٔ
   هر بسته نشان می‌دهد. جست‌وجو جدول را فیلتر می‌کند، گزینهٔ *فقط به‌روزنشده‌ها*
   آن را به بسته‌های عقب‌مانده از نمایه محدود می‌کند و ستون‌ها مرتب می‌شوند.
@@ -457,10 +533,16 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
   می‌کند و با یک کلیک به آن سوییچ می‌شوید. سوییچ، جدول بسته‌ها و انتخاب‌گر نوار
   بالا را هم همراه خود می‌برد، تا تمام پنجره بر یک محیط «فعلی» توافق داشته
   باشد.
+* **جست‌وجو** بسته‌ها را در PyPI پیدا می‌کند: پرس‌وجو بر پایهٔ یک فهرست همراه
+  از بسته‌های محبوب رتبه‌بندی و با نمایهٔ زنده حل می‌شود، چند نگاه هم‌زمان، و
+  نتایج همان‌طور که می‌رسند پر می‌شوند. انتخاب یک نتیجه، تاریخچهٔ انتشارش را
+  می‌آورد تا آخرین نسخه را نصب کنید یا دقیقاً نسخه‌ای را که خودتان برداشته‌اید
+  سنجاق کنید — از همان مسیر تأیید که هر کار دیگر می‌گذرد.
 * **تغییر دادن چیزی** — نصب، حذف، ارتقا، نصب نسخهٔ قدیمی‌تر، ارتقای همه — از یک
   مسیر می‌گذرد: نقشه ساخته می‌شود، نگهبان سکو تصمیم می‌گیرد آیا این محیط اصلاً
   قابل تغییر است، و یک تأییدیه *دستور دقیق* و محیط هدف را پیش از هر اجرا نشان
-  می‌دهد. هیچ‌چیز بی‌صدا تغییر نمی‌کند.
+  می‌دهد. هیچ‌چیز بی‌صدا تغییر نمی‌کند، و پیش از هر چیز یک نقطهٔ بازیابی خودکار
+  از وضعیت نصب نوشته می‌شود، پس هر کاری قابل واگردانی است.
 * **وابستگی‌ها** سه پرسش را به همان ترتیبی که آدم‌ها می‌پرسند پاسخ می‌دهد. یک
   بسته را انتخاب کنید تا بگوید *چرا* نصب است — زنجیرهٔ نام بسته‌ها از بسته‌ای که
   خواسته‌اید تا این یکی، یا صریحاً اینکه هیچ‌چیز به آن نیاز ندارد — سپس نشان
@@ -468,6 +550,22 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
   هر نیاز اعلام‌شده‌ای که نصب نیست را علامت می‌زند. پایین‌تر، بسته‌هایی را
   فهرست می‌کند که هیچ‌چیز به آن‌ها نیاز ندارد و شما هم با نام نخواسته‌اید، و
   پیش از حذف **پیش‌نمایش** می‌دهد.
+* **امنیت** بسته‌های نصب‌شده را با پایگاه دادهٔ آسیب‌پذیری‌های
+  [OSV.dev](https://osv.dev) می‌سنجد — فقط وقتی دکمه را بزنید و فقط با ارسال
+  نام و نسخهٔ هر بسته، هیچ‌چیز دیگر. یافته‌ها همان‌طور که می‌رسند با شدت، نسخه‌ای
+  که مشکل در آن رفع شده، و لینک هشدار می‌آیند که در مرورگر سیستم و فقط با
+  HTTPS باز می‌شود. **ارتقا برای رفع** همان ارتقای معمولی است با دلیل بهتر:
+  از همان تأیید، نقطهٔ بازیابی و گزارش عبور می‌کند.
+* **نقاط بازیابی** نسخه‌های دقیق نصبِ لحظه را به‌صورت فایل‌های JSON کوچک زیر
+  پوشهٔ دادهٔ برنامه ضبط می‌کند. **بازگردانی** پیش‌نمایشی از همهٔ کاری که می‌کند
+  نشان می‌دهد — کدام بسته‌ها با کدام نسخهٔ ضبط‌شده برمی‌گردند، کدام‌ها از آن پس
+  آمده‌اند و حذف می‌شوند، و فرمان‌های دقیق — و آن‌ها را به‌صورت یک دستهٔ
+  تأییدشده به ترتیب اجرا می‌کند.
+* **تاریخچه** هر کار تغییردهنده‌ای که اجرا شده را با زمان، بسته‌ها و نتیجه‌اش
+  فهرست می‌کند. **واگردانی** آنچه نقطهٔ بازیابی خودکارِ پیش از آن کار دربارهٔ
+  بسته‌های خودِ همان کار به یاد دارد برمی‌گرداند — حتی حذف‌ها، چون نسخه‌ها پیش
+  از حذف هر چیز ضبط شده‌اند. واگردانی خودش هم یک بازگردانی است، پس همان
+  پیش‌نمایش و تأیید را می‌گیرد.
 * **پنل گزارش** در پایین، خروجی خودِ دستور را همان‌طور که اجرا می‌شود نمایش
   می‌دهد و دکمهٔ لغو آن، درخت فرایند را متوقف می‌کند — نه فقط یک فرایند را.
 * **تنظیمات** تم، زبان، تعداد بسته در هر صفحه، عرض نوار کناری، نمایهٔ PyPI
@@ -487,6 +585,24 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
 می‌گوید. سپس پنجره راه بیرون را پیشنهاد می‌دهد: **ساخت محیط مجازی**، که با
 `python -m venv` یکی می‌سازد، پیشرفت را در پنل گزارش نمایش می‌دهد تا بتوان لغو
 کرد، و پس از پایان پنجره را به محیط تازه سوییچ می‌کند.
+
+### وقتی uv به کمک سیستم نیاز دارد
+
+pip و uv در یک جا نمی‌نویسند. روی یک پایتون همه‌کاربر (زیر `Program Files` در
+ویندوز، `/usr/lib` در جای دیگر) pip به site «کاربر» برمی‌گردد — دایرکتوری‌ای که
+هر کاربر عادی می‌تواند در آن بنویسد — اما uv همیشه فقط در site-packages خودِ
+محیط می‌نویسد که آنجا به کمک سیستم‌عامل نیاز دارد:
+
+* پنجرهٔ تأیید این را توضیح می‌دهد و دکمه **اجرای با دسترسی مدیر** است؛ با
+  پذیرش، همان یک فرمان با دسترسی بالا اجرا می‌شود، از راه اعلان خود سیستم‌عامل
+  (‏UAC در ویندوز، `pkexec` در لینوکس). درخواست فقط برای همان یک کار است — خودِ
+  پای‌پک‌هاب هرگز با دسترسی مدیر اجرا نمی‌شود و چیزی برای بعد ذخیره نمی‌شود.
+* اگر بسته‌ای که تغییر می‌دهید از site کاربر خوانده شود — جایی که pip آن را گذاشته
+  و uv هرگز در آن نمی‌نویسد — یک uv با دسترسی مدیر، جایی می‌نویسد که پایتون
+  هرگز نگاه نمی‌کند. پای‌پک‌هاب این را پیش از هر اجرا تشخیص می‌دهد و همان کار را
+  به‌جای آن **با pip** پیشنهاد می‌کند و فرمان دقیق pip را نشان می‌دهد: pip همان
+  نسخه‌ای را که واقعاً استفاده می‌کنید ارتقا می‌دهد، به‌صورت کاربر عادی و بدون
+  هیچ درخواست دسترسی مدیریتی.
 
 ## توسعه
 
@@ -525,27 +641,32 @@ src/pypackhub/
     validation.py      # همهٔ ورودی بیرونی پیش از استفاده اعتبارسنجی می‌شود
     platform_guard.py  # محافظت از مفسر سیستم و PEP 668
     backends/          # یک کلاس برای هر مدیر بسته، یک قرارداد مشترک
-    environments.py    # شناسایی، اطلاعات سیستم، ساخت محیط مجازی
+    environments.py    # شناسایی، اطلاعات سیستم، ساخت محیط مجازی، حدس کاربرد
     inventory.py       # بسته‌های نصب‌شدهٔ یک محیط
     metadata.py        # فرادادهٔ dist-info نصب‌شده و دادهٔ وابستگی
     deps.py            # گراف وابستگی‌ها و پاک‌سازی ساخته‌شده روی آن
     sizes.py           # مصرف دیسک بسته‌های نصب‌شده
-    pypi.py            # جست‌وجو، نسخه‌ها، فراداده، حافظهٔ موقت
+    pypi.py            # نسخه‌ها، فراداده، حافظهٔ موقت
+    search.py          # چه چیزی نگاه کنیم: رتبه‌بندی فهرست همراه + حل روی نمایه
+    security.py        # بررسی آسیب‌پذیری برابر OSV.dev (فقط نام==نسخه)
+    snapshots.py       # نقاط بازیابی محیط، تفاوت‌ها و سنجاق‌های بازگردانی
     net.py             # کلاینت HTTP تنها HTTPS
     secrets.py         # دسترسی به کلیددانی و پاک‌سازی گزارش
     settings.py        # مدل تنظیمات و اعتبارسنجی آن
-    tasks.py           # صف کار، لغو، پیشرفت، تاریخچه
+    tasks.py           # صف کار، لغو، پیشرفت، تاریخچهٔ ضبط‌شده
   ui/            # لایهٔ نمایش PySide6 (Qt 6)
     theme/             # توکن‌های طراحی، تولید QSS، مدیر تم
     i18n/              # جدول‌های ترجمه، مترجم، دلایل رد، راست‌به‌چپ
     widgets/           # جدول بسته‌ها، پنل جزئیات، پنل گزارش، پنجره‌ها، اعلان‌ها، نشانگر چرخان
-    views/             # پوستهٔ پنجره، پنجرهٔ اصلی، بسته‌ها، محیط‌ها، وابستگی‌ها، تنظیمات
-  assets/        # فونت‌های همراه و نماد برنامه
+    views/             # پوستهٔ پنجره، پنجرهٔ اصلی، داشبورد، بسته‌ها، محیط‌ها،
+                       # وابستگی‌ها، جست‌وجو، امنیت، نقاط بازیابی، تاریخچه، تنظیمات
+  assets/        # فونت‌های همراه، نماد برنامه و فهرست بسته‌های محبوب
+
+tests/           # تست‌های واحد، به‌علاوهٔ tests/security برای تضمین‌های امنیتی
 ```
 
-`security.py` (جست‌وجوی آسیب‌پذیری)، `trust.py` (شبیه‌سازی نام) و
-`snapshots.py` برنامه‌ریزی شده‌اند اما هنوز نوشته نشده‌اند، پس عمداً از درخت
-بالا حذف شده‌اند تا آن‌گونه که وجود دارند فهرست نشوند.
+`trust.py` (شبیه‌سازی نام و نشانه‌های زنجیرهٔ تأمین) برنامه‌ریزی شده اما هنوز
+نوشته نشده، پس عمداً از درخت بالا حذف شده تا آن‌گونه که وجود دارد فهرست نشود.
 
 سه قاعده طراحی را کنار هم نگه می‌دارد و هرکدام با یک تست اعمال می‌شود، نه با
 نظم شخصی:
@@ -565,6 +686,11 @@ src/pypackhub/
 هشدارهای شبیه‌سازی نام و زنجیرهٔ تأمین، محافظت فقط‌خواندنی از مفسرهای سیستم،
 شبکه‌سازی تنها HTTPS، اعتبارنامه‌ها در کلیددانی سیستم‌عامل، و پاک‌سازی
 راز‌ها از گزارش‌ها و تشخیص‌ها.
+
+بررسی آسیب‌پذیری هم به همین قاعده‌ها پایبند است: فقط وقتی شما بخواهید اجرا
+می‌شود و از OSV.dev فقط دربارهٔ «نام==نسخه» بسته‌های نصب‌شده می‌پرسد و هیچ‌چیز
+دیگر — نه مسیر، نه نام ماشین، نه جزئیات محیط — از همان کلاینت تنها-HTTPS که
+همهٔ قابلیت‌های شبکه از آن استفاده می‌کنند.
 
 برای مدل کامل، از جمله آنچه امروز پیاده شده و شیوهٔ گزارش خصوصی آسیب‌پذیری،
 [SECURITY.md](SECURITY.md) را بخوانید.

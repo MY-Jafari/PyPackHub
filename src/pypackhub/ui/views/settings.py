@@ -18,6 +18,7 @@ half-switches language is worse than one that does not switch at all.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,7 +26,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -36,7 +39,18 @@ from pypackhub.core.settings import (
     validate_settings,
 )
 from pypackhub.ui.i18n.translations import TranslationKey
+from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
+
+__all__ = ["PACKAGE_MANAGER_CHOICES", "SettingsView"]
+
+#: The package managers the user may force, in the order the combo offers them.
+#: ``auto`` is first because it is the default and the one most users want.
+PACKAGE_MANAGER_CHOICES: tuple[str, ...] = ("auto", "pip", "uv")
+
+#: How wide a control on this page is before the layout stretches it. A combo
+#: that only sizes itself to "uv" is a control nobody can aim at.
+SETTINGS_FIELD_MIN_WIDTH: int = 220
 
 
 class SettingsView(QWidget):
@@ -46,9 +60,19 @@ class SettingsView(QWidget):
     follows the current language without the page having to know when that happens.
     """
 
-    def __init__(self, *, shell: WindowShell, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        shell: WindowShell,
+        context: UiContext | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._shell = shell
+        # The services the package-manager choice has to reach. Optional so the
+        # page can still be built without one (as the test-suite does) - a page
+        # with no context keeps its settings, it only cannot rewire the provider.
+        self._context = context
         # Set while ``load_settings`` writes into the controls: it stops the
         # change handlers from reading half-populated fields and validating them.
         self._loading = False
@@ -59,24 +83,47 @@ class SettingsView(QWidget):
         self._labels: dict[TranslationKey, QLabel] = {}
         self._line_edits: list[QLineEdit] = []
 
-        layout = QFormLayout(self)
+        # The page is taller than most windows, so it scrolls: a group that falls
+        # off the bottom edge with no scrollbar is a setting the user cannot
+        # reach at all.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setObjectName("settingsScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._body = QWidget(self._scroll)
+        self._body.setObjectName("settingsBody")
+        self._scroll.setWidget(self._body)
+        outer.addWidget(self._scroll, 1)
+
+        layout = QFormLayout(self._body)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
+        # Fields grow with the page and the labels stay next to their control, so
+        # the page reads as a form rather than as two columns that drift apart.
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # -- appearance ----------------------------------------------------------
 
         appearance_layout = self._group(layout, TranslationKey.SETTINGS_TITLE)
 
-        self._theme_combo = QComboBox(self)
+        self._theme_combo = QComboBox(self._body)
         self._theme_combo.setObjectName("settingsCombo")
-        self._theme_combo.setMinimumWidth(160)
+        self._theme_combo.setMinimumWidth(SETTINGS_FIELD_MIN_WIDTH)
         for theme_member in ColorTheme:
             self._theme_combo.addItem(self._theme_label(theme_member), theme_member.value)
         appearance_layout.addRow(self._label(TranslationKey.SETTINGS_THEME), self._theme_combo)
 
-        self._language_combo = QComboBox(self)
+        self._language_combo = QComboBox(self._body)
         self._language_combo.setObjectName("settingsCombo")
-        self._language_combo.setMinimumWidth(160)
+        self._language_combo.setMinimumWidth(SETTINGS_FIELD_MIN_WIDTH)
         for language_member in Language:
             self._language_combo.addItem(
                 self._language_label(language_member), language_member.value
@@ -92,16 +139,18 @@ class SettingsView(QWidget):
 
         table_layout = self._group(layout, TranslationKey.SETTINGS_TABLE)
 
-        self._page_size = QSpinBox(self)
+        self._page_size = QSpinBox(self._body)
         self._page_size.setObjectName("settingsSpinBox")
+        self._page_size.setMinimumWidth(SETTINGS_FIELD_MIN_WIDTH)
         self._page_size.setMinimum(10)
         self._page_size.setMaximum(500)
         self._page_size.setSingleStep(10)
         self._page_size.setSuffix(" " + self._text(TranslationKey.SETTINGS_PACKAGES_PER_PAGE_UNITS))
         table_layout.addRow(self._label(TranslationKey.SETTINGS_PACKAGE_PAGE_SIZE), self._page_size)
 
-        self._sidebar_width = QSpinBox(self)
+        self._sidebar_width = QSpinBox(self._body)
         self._sidebar_width.setObjectName("settingsSpinBox")
+        self._sidebar_width.setMinimumWidth(SETTINGS_FIELD_MIN_WIDTH)
         self._sidebar_width.setMinimum(80)
         self._sidebar_width.setMaximum(600)
         self._sidebar_width.setSingleStep(10)
@@ -126,51 +175,82 @@ class SettingsView(QWidget):
 
         behaviour_layout = self._group(layout, TranslationKey.SETTINGS_BEHAVIOUR)
 
-        self._confirm_install = QCheckBox(self)
+        self._confirm_install = QCheckBox(self._body)
         self._confirm_install.setObjectName("settingsCheckBox")
         behaviour_layout.addRow(
             self._label(TranslationKey.SETTINGS_CONFIRM_INSTALL), self._confirm_install
         )
 
-        self._confirm_uninstall = QCheckBox(self)
+        self._confirm_uninstall = QCheckBox(self._body)
         self._confirm_uninstall.setObjectName("settingsCheckBox")
         behaviour_layout.addRow(
             self._label(TranslationKey.SETTINGS_CONFIRM_UNINSTALL), self._confirm_uninstall
         )
 
-        self._confirm_upgrade = QCheckBox(self)
+        self._confirm_upgrade = QCheckBox(self._body)
         self._confirm_upgrade.setObjectName("settingsCheckBox")
         behaviour_layout.addRow(
             self._label(TranslationKey.SETTINGS_CONFIRM_UPGRADE), self._confirm_upgrade
         )
 
-        self._show_sizes = QCheckBox(self)
+        self._show_sizes = QCheckBox(self._body)
         self._show_sizes.setObjectName("settingsCheckBox")
         behaviour_layout.addRow(self._label(TranslationKey.SETTINGS_SHOW_SIZES), self._show_sizes)
 
-        self._show_outdated = QCheckBox(self)
+        self._show_outdated = QCheckBox(self._body)
         self._show_outdated.setObjectName("settingsCheckBox")
         behaviour_layout.addRow(
             self._label(TranslationKey.SETTINGS_SHOW_OUTDATED), self._show_outdated
         )
 
-        self._package_manager = QComboBox(self)
+        self._package_manager = QComboBox(self._body)
         self._package_manager.setObjectName("settingsCombo")
-        self._package_manager.setMinimumWidth(160)
-        for choice in ("auto", "pip", "uv"):
+        self._package_manager.setMinimumWidth(SETTINGS_FIELD_MIN_WIDTH)
+        # Filled before it is connected: adding the first entry to an empty combo
+        # emits ``currentIndexChanged``, and handling it here would validate a form
+        # whose other fields are still empty.
+        for choice in PACKAGE_MANAGER_CHOICES:
             self._package_manager.addItem(self._package_manager_label(choice), choice)
         self._package_manager.currentIndexChanged.connect(self._on_package_manager_changed)
         behaviour_layout.addRow(
-            self._label(TranslationKey.SETTINGS_PACKAGE_MANAGER), self._package_manager
+            self._label(TranslationKey.SETTINGS_PACKAGE_MANAGER),
+            self._package_manager_field(),
         )
 
-        layout.addRow(QWidget(self))
+        layout.addRow(QWidget(self._body))
 
     # -- construction helpers ---------------------------------------------------
 
+    def _package_manager_field(self) -> QWidget:
+        """The package-manager choice, together with the sentence explaining it.
+
+        The hint for this setting has been in both translation tables since the
+        page was written and was never rendered, which left the row as a bare
+        control: a combo saying "auto" with nothing anywhere saying what
+        automatic means. It now travels with the control, and the control is a
+        full-width field instead of a sliver sized to its shortest entry.
+        """
+        container = QWidget(self._body)
+        field = QVBoxLayout(container)
+        field.setContentsMargins(0, 0, 0, 0)
+        field.setSpacing(4)
+        field.addWidget(self._package_manager)
+
+        self._package_manager_hint = QLabel(container)
+        self._package_manager_hint.setObjectName("settingsHint")
+        self._package_manager_hint.setWordWrap(True)
+        self._package_manager_hint.setText(
+            self._shell.text(TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT)
+        )
+        field.addWidget(self._package_manager_hint)
+        # Registered under its key, so the language switch re-renders it with the
+        # rest of the page rather than leaving one English sentence behind.
+        self._labels[TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT] = self._package_manager_hint
+        return container
+
     def _group(self, layout: QFormLayout, key: TranslationKey) -> QFormLayout:
         """Add a titled group box for *key* and return its form layout."""
-        box = QGroupBox(self)
+        box = QGroupBox(self._body)
         box.setObjectName("settingsGroup")
         box.setTitle(self._shell.text(key))
         inner = QFormLayout(box)
@@ -182,15 +262,16 @@ class SettingsView(QWidget):
 
     def _line_edit(self, layout: QFormLayout, key: TranslationKey) -> QLineEdit:
         """Add a labelled text field, registered for re-translation."""
-        edit = QLineEdit(self)
+        edit = QLineEdit(self._body)
         edit.setObjectName("settingsLineEdit")
+        edit.setMinimumWidth(SETTINGS_FIELD_MIN_WIDTH)
         edit.setPlaceholderText(self._shell.text(TranslationKey.SETTINGS_LINES_HINT))
         layout.addRow(self._label(key), edit)
         self._line_edits.append(edit)
         return edit
 
     def _label(self, key: TranslationKey) -> QLabel:
-        label = QLabel(self)
+        label = QLabel(self._body)
         label.setObjectName("settingsLabel")
         label.setText(self._shell.text(key))
         label.setWordWrap(True)
@@ -216,13 +297,15 @@ class SettingsView(QWidget):
             Language.FA: "\u0641\u0627",
         }[member]
 
-    @staticmethod
-    def _package_manager_label(choice: str) -> str:
-        return {
-            "auto": "auto",
-            "pip": "pip",
-            "uv": "uv",
-        }[choice]
+    def _package_manager_label(self, choice: str) -> str:
+        """What one package-manager entry says in this language.
+
+        Only ``auto`` needs a sentence: pip and uv are their own names in every
+        language, and translating them would make the entry harder to recognise.
+        """
+        if choice == "auto":
+            return self._shell.text(TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO)
+        return choice
 
     # -- population -------------------------------------------------------------
 
@@ -243,7 +326,7 @@ class SettingsView(QWidget):
             self._show_sizes.setChecked(settings.show_sizes_by_default)
             self._show_outdated.setChecked(settings.show_outdated_by_default)
             self._package_manager.setCurrentIndex(
-                ("auto", "pip", "uv").index(settings.package_manager)
+                PACKAGE_MANAGER_CHOICES.index(settings.package_manager)
             )
         finally:
             self._loading = False
@@ -289,10 +372,13 @@ class SettingsView(QWidget):
         settings = self.current_settings()
         old_package_manager = self._shell.settings.package_manager
         self._shell.apply_settings(settings)
-        # Changing the package manager must rebuild the provider so that newly
-        # opened environments use the chosen backend rather than the previous one.
-        if settings.package_manager != old_package_manager and hasattr(self._shell, "context"):
-            self._shell.context.set_package_manager(settings.package_manager)
+        # Changing the package manager must reach the services the views share.
+        # The window hands this page its context for exactly that: the shell is
+        # settings, theme and language state, and has no context of its own, so
+        # asking it for one would silently skip the change - which is how picking
+        # a manager here used to do nothing until the next launch.
+        if settings.package_manager != old_package_manager and self._context is not None:
+            self._context.set_package_manager(settings.package_manager)
         # The shell re-translates and re-themes the window, which reads the
         # controls back in the new language, so this write does not fight it.
         self._shell.save()
@@ -319,8 +405,11 @@ class SettingsView(QWidget):
         for index, language_member in enumerate(Language):
             self._language_combo.setItemText(index, self._language_label(language_member))
 
-        for index, choice in enumerate(("auto", "pip", "uv")):
+        for index, choice in enumerate(PACKAGE_MANAGER_CHOICES):
             self._package_manager.setItemText(index, self._package_manager_label(choice))
+        self._package_manager.setToolTip(
+            self._shell.text(TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT)
+        )
 
 
 def _lines(text: str) -> tuple[str, ...]:

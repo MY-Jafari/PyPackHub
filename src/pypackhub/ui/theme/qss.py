@@ -71,6 +71,7 @@ def _sections(tokens: DesignTokens, *, rtl: bool) -> list[str]:
         _labels(tokens),
         _buttons(tokens),
         _inputs(tokens),
+        _settings(tokens),
         _tables(tokens),
         _badges(tokens),
         _log_console(tokens),
@@ -308,6 +309,14 @@ QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
     background-color: {tokens.background_secondary};
 }}
 
+/* A styled QComboBox takes its height from the style sheet, and with no
+   min-height that is a few pixels: the control renders as a thin bar that is
+   impossible to aim at. Every combo in the application - the environment
+   switcher, the settings fields - is a real control because of this rule. */
+QComboBox {{
+    min-height: 26px;
+}}
+
 QComboBox::drop-down {{
     border: none;
     width: 22px;
@@ -337,6 +346,55 @@ QCheckBox::indicator:checked {{
 
 #searchInput {{
     min-height: 26px;
+}}"""
+
+
+def _settings(tokens: DesignTokens) -> str:
+    """The settings page: cards, aligned labels and readable hints.
+
+    The page is the one screen made almost entirely of form fields, so it is the
+    one place where a control with no width or height of its own is obvious: the
+    package-manager choice looked like an empty slot because nothing gave it a
+    shape. The field rules below give every settings control the same floor, so
+    the page reads as one column of fields instead of a column of accidents.
+    """
+    return f"""\
+#settingsScroll, #settingsBody {{
+    background-color: {tokens.background};
+    border: none;
+}}
+
+QGroupBox#settingsGroup {{
+    background-color: {tokens.surface};
+    border: 1px solid {tokens.border_subtle};
+    border-radius: {tokens.radius_l};
+    margin-top: 14px;
+    padding: 16px 14px 14px 14px;
+}}
+
+QGroupBox#settingsGroup::title {{
+    color: {tokens.text_secondary};
+    font-weight: 600;
+    left: 12px;
+    padding: 0 6px;
+}}
+
+#settingsLabel {{
+    color: {tokens.text_secondary};
+}}
+
+#settingsHint {{
+    color: {tokens.text_muted};
+    font-size: {TABLE_FONT_SIZE_PX}px;
+}}
+
+#settingsCombo, #settingsLineEdit, #settingsSpinBox {{
+    min-height: 26px;
+    min-width: 220px;
+}}
+
+#settingsCheckBox {{
+    spacing: 8px;
 }}"""
 
 

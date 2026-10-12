@@ -86,6 +86,31 @@ def test_core_surfaces_are_styled() -> None:
         assert selector in stylesheet, f"{selector} has no rule"
 
 
+def test_the_settings_page_and_its_fields_are_styled() -> None:
+    """A styled QComboBox takes its height from the sheet, so it needs a floor.
+
+    Without a ``min-height`` the settings combos rendered as thin bars - the
+    package-manager choice was the one that made it obvious - so the rule is part
+    of the contract rather than a detail of one page.
+    """
+    sheet = build_qss(LIGHT)
+
+    assert "QComboBox {" in sheet
+    assert "min-height: 26px" in sheet
+    for selector in (
+        "#settingsScroll",
+        "#settingsBody",
+        "QGroupBox#settingsGroup",
+        "QGroupBox#settingsGroup::title",
+        "#settingsLabel",
+        "#settingsHint",
+        "#settingsCombo",
+        "#settingsLineEdit",
+        "#settingsSpinBox",
+    ):
+        assert selector in sheet, f"{selector} has no rule"
+
+
 def test_fonts_are_named_in_the_stylesheet() -> None:
     stylesheet = build_qss(LIGHT)
     assert '"Inter"' in stylesheet

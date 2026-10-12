@@ -26,7 +26,7 @@ import base64
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from PySide6.QtCore import QByteArray, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShowEvent
@@ -62,6 +62,7 @@ from pypackhub.ui.views.packages import PackagesView
 from pypackhub.ui.views.search import SearchView
 from pypackhub.ui.views.security import SecurityView
 from pypackhub.ui.views.settings import SettingsView
+from pypackhub.ui.views.snapshots import SnapshotView
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.log_panel import LogPanel
 from pypackhub.ui.widgets.toast import ToastHost, ToastKind
@@ -158,6 +159,24 @@ NAVIGATION: tuple[NavigationEntry, ...] = (
         TranslationKey.VIEW_PLACEHOLDER_SETTINGS,
         available=True,
     ),
+)
+
+
+#: Pages whose ``retranslate`` re-renders from the shell or the context they were
+#: built with, and therefore takes no argument. Every other page takes the
+#: translator. Kept as one list rather than guessed at the call site, because
+#: calling a no-argument ``retranslate`` with an argument raises inside the
+#: language switch.
+SHELL_AWARE_PAGES: Final = (
+    PackagesView,
+    SettingsView,
+    DependenciesView,
+    EnvironmentsView,
+    SearchView,
+    SecurityView,
+    SnapshotView,
+    HistoryView,
+    DashboardView,
 )
 
 
@@ -261,10 +280,21 @@ class MainWindow(QMainWindow):
         return self._toasts
 
     def register_view(self, name: ViewName, view: QWidget) -> None:
+        """Put *view* in the stack for *name*, replacing whatever was there.
+
+        Both the placeholder and any earlier registration are removed: a page that
+        was replaced must not stay in the stack as a second, unreachable copy of
+        the same destination.
+        """
         placeholder = self._placeholders.pop(name, None)
         if placeholder is not None:
             self._stack.removeWidget(placeholder)
             placeholder.deleteLater()
+
+        previous = self._views.get(name)
+        if previous is not None and previous is not view:
+            self._stack.removeWidget(previous)
+            previous.deleteLater()
 
         self._views[name] = view
         self._stack.addWidget(view)
@@ -284,6 +314,7 @@ class MainWindow(QMainWindow):
 
         self._settings_view = SettingsView(
             shell=self._shell,  # nosec B604
+            context=self._context,
             parent=self,
         )
         self._settings_view.load_settings(self._shell.settings)
@@ -304,38 +335,49 @@ class MainWindow(QMainWindow):
         self._log_panel.hide_requested.connect(lambda: self.set_log_panel_visible(False))
         self._search_input.textChanged.connect(self._on_search_changed)
 
-        for entry in NAVIGATION:
-            if entry.name in {
-                ViewName.SEARCH,
-                ViewName.DEPENDENCIES,
-                ViewName.HISTORY,
-            }:
-                self.register_view(entry.name, _stub_view_for(entry))
-
         self._search_view = SearchView(
-            translator=self._shell.translator,
+            context=self._context,
+            shell=self._shell,  # nosec B604
             parent=self,
         )
         self.register_view(ViewName.SEARCH, self._search_view)
+        self._search_view.install_requested.connect(self._packages.confirm_and_run)
+        self._search_view.status_changed.connect(self._on_status_changed)
+        self._search_view.toast.connect(self._show_toast)
 
         self._history_view = HistoryView(
-            translator=self._shell.translator,
+            context=self._context,
+            shell=self._shell,  # nosec B604
             parent=self,
         )
         self.register_view(ViewName.HISTORY, self._history_view)
+        self._history_view.undo_requested.connect(self._packages.undo_action)
+        self._history_view.status_changed.connect(self._on_status_changed)
+        self._history_view.toast.connect(self._show_toast)
 
         self._security_view = SecurityView(
-            translator=self._shell.translator,
+            context=self._context,
+            shell=self._shell,  # nosec B604
             parent=self,
         )
         self.register_view(ViewName.SECURITY, self._security_view)
+        self._security_view.fix_requested.connect(self._packages.confirm_and_run)
+        self._security_view.status_changed.connect(self._on_status_changed)
+        self._security_view.toast.connect(self._show_toast)
 
-        self._security_view = SecurityView(
-            translator=self._shell.translator,
+        self._snapshots_view = SnapshotView(
+            context=self._context,
+            shell=self._shell,  # nosec B604
             parent=self,
         )
-        self.register_view(ViewName.SECURITY, self._security_view)
-
+        self.register_view(ViewName.SNAPSHOTS, self._snapshots_view)
+        self._snapshots_view.rollback_requested.connect(
+            lambda environment, snapshot_id: self._packages.restore_snapshot(
+                environment, snapshot_id
+            )
+        )
+        self._snapshots_view.status_changed.connect(self._on_status_changed)
+        self._snapshots_view.toast.connect(self._show_toast)
 
         self._environments_view = EnvironmentsView(
             context=self._context,
@@ -345,12 +387,16 @@ class MainWindow(QMainWindow):
         self.register_view(ViewName.ENVIRONMENTS, self._environments_view)
         self._environments_view.environment_selected.connect(self._on_environment_selected)
         self._environments_view.toast.connect(self._show_toast)
+
         self._dashboard_view = DashboardView(
-            translator=self._shell.translator,
+            context=self._context,
+            shell=self._shell,  # nosec B604
             parent=self,
         )
         self.register_view(ViewName.DASHBOARD, self._dashboard_view)
         self._dashboard_view.refresh_requested.connect(self._refresh_dashboard)
+        self._dashboard_view.status_changed.connect(self._on_status_changed)
+        self._dashboard_view.toast.connect(self._show_toast)
 
     def show_view(self, name: ViewName) -> None:
         """Show a view by name."""
@@ -381,6 +427,12 @@ class MainWindow(QMainWindow):
 
         if name is ViewName.DASHBOARD and hasattr(self, "_dashboard_view"):
             self._refresh_dashboard()
+
+        if name is ViewName.HISTORY and hasattr(self, "_history_view"):
+            self._history_view.refresh()
+
+        if name is ViewName.SNAPSHOTS and hasattr(self, "_snapshots_view"):
+            self._snapshots_view.refresh()
 
         for view_name, nav_button in self._nav_buttons.items():
             nav_button.setChecked(view_name is name)
@@ -659,14 +711,25 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text)
 
     def _refresh_dashboard(self) -> None:
-        """Refresh the dashboard data from the current inventory."""
+        """Refresh the dashboard data from the current inventory and scan."""
         packages = self._packages
-        if packages.inventory is not None:
-            self._dashboard_view.set_inventory(packages.inventory)
-            self._dashboard_view.set_loading(False)
-        else:
-            self._dashboard_view.set_loading(True)
+        if packages.inventory is None:
             packages.refresh()
+
+        security = self._security_view
+        vulnerable_time = ""
+        report = security.report
+        if report is not None and report.timestamp:
+            from datetime import datetime
+
+            vulnerable_time = datetime.fromtimestamp(report.timestamp).strftime("%H:%M:%S")
+
+        self._dashboard_view.set_data(
+            packages.inventory,
+            vulnerable_count=security.vulnerable_count,
+            vulnerable_time=vulnerable_time,
+        )
+        self._dashboard_view.refresh()
 
     def _show_toast(self, text: str, kind: object) -> None:
         toast_kind = kind if isinstance(kind, ToastKind) else ToastKind.INFO
@@ -717,16 +780,8 @@ class MainWindow(QMainWindow):
 
         for index in range(self._stack.count()):
             page = self._stack.widget(index)
-            if isinstance(page, PlaceholderView):
-                page.retranslate(shell)
-            elif isinstance(page, (SettingsView, DependenciesView)):
-                page.retranslate()
-            _stub_title = getattr(page, "_stub_title", None)
-            _stub_body = getattr(page, "_stub_body", None)
-            _stub_body_key = getattr(page, "_stub_body_key", "")
-            if _stub_title is not None and _stub_body is not None and _stub_body_key:
-                _stub_title.setText(shell.text(TranslationKey.VIEW_EMPTY_TITLE))
-                _stub_body.setText(shell.text(_stub_body_key))
+            if page is not None:
+                self._retranslate_page(page)
 
         self._view_menu.setTitle(shell.text(TranslationKey.MENU_VIEW))
         self._theme_action.setText(shell.text(TranslationKey.SETTINGS_THEME))
@@ -741,11 +796,31 @@ class MainWindow(QMainWindow):
             "EN" if shell.translator.resolved_language is not Language.FA else "\u0641\u0627"
         )
         self._language_button.setToolTip(shell.text(TranslationKey.TOPBAR_TOGGLE_LANGUAGE))
-        self._packages.retranslate()
+        # The stack loop above covers every registered page; the log panel is not
+        # a page, so it is re-rendered here.
         self._log_panel.retranslate(shell.translator)
-        if hasattr(self, "_dashboard_view"):
-            self._dashboard_view.retranslate(shell.translator)
         self.statusBar().showMessage(shell.text(TranslationKey.APP_VERSION, version=__version__))
+
+    def _retranslate_page(self, page: QWidget) -> None:
+        """Re-render one registered page in the language the shell now speaks.
+
+        The pass used to name the two views that happened to exist when it was
+        written, so every page registered since then kept the previous language:
+        the sidebar said one thing and the Search, History, Security and Snapshots
+        pages said another. A page is asked to re-render if it can, whatever it is.
+        """
+        if isinstance(page, PlaceholderView):
+            page.retranslate(self._shell)
+            return
+
+        retranslate = getattr(page, "retranslate", None)
+        if not callable(retranslate):
+            return
+
+        if isinstance(page, SHELL_AWARE_PAGES):
+            retranslate()
+        else:
+            retranslate(self._shell.translator)
 
     def _theme_label(self) -> str:
         theme = self._shell.settings.theme
@@ -795,41 +870,6 @@ def _decode(value: str) -> QByteArray | None:
 def _with_window_state(settings: AppSettings, *, geometry: str, state: str) -> AppSettings:
     """Return a copy of *settings* with the window geometry replaced."""
     return replace(settings, main_window_geometry=geometry, main_window_state=state)
-
-
-class _StubView(QWidget):
-    """An enabled destination whose real view is not built yet.
-
-    It replaces the destination's placeholder page once the window decides to
-    show a stub rather than a real view. The labels are kept as attributes so the
-    window's ``retranslate`` pass can re-render them in the current language.
-    """
-
-    def __init__(self, *, body_key: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("contentPanel")
-        self._stub_body_key = body_key
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(8)
-        layout.addStretch(1)
-
-        self._stub_title = QLabel(self)
-        self._stub_title.setObjectName("emptyStateTitle")
-        self._stub_title.setWordWrap(True)
-        layout.addWidget(self._stub_title)
-
-        self._stub_body = QLabel(self)
-        self._stub_body.setObjectName("emptyStateBody")
-        self._stub_body.setWordWrap(True)
-        layout.addWidget(self._stub_body)
-        layout.addStretch(2)
-
-
-def _stub_view_for(entry: NavigationEntry) -> QWidget:
-    """A placeholder-replacing stub for a destination whose real view is not built."""
-    return _StubView(body_key=entry.placeholder_key)
 
 
 def _entry_for(name: ViewName) -> NavigationEntry | None:

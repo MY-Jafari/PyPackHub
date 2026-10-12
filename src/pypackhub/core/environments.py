@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -38,6 +38,7 @@ __all__ = [
     "SystemInfo",
     "create_environment",
     "detected_environments",
+    "infer_purpose",
     "system_info",
 ]
 
@@ -352,3 +353,142 @@ def detected_environments(
         environments=tuple(found),
         scanned_roots=scanned,
     )
+
+
+# -- purpose inference ---------------------------------------------------------
+
+
+def _normalized(name: str) -> str:
+    return name.strip().lower().replace("_", "-").replace(".", "-")
+
+
+#: The purpose guesses the dashboard offers, keyed by the stable identifier the
+#: UI translates. Each set of names votes; the purpose with the most hits wins.
+#: The exact wording lives in the translation tables - the identifiers are not
+#: user-facing text.
+_PURPOSE_SIGNALS: Final[dict[str, frozenset[str]]] = {
+    "data-science": frozenset(
+        {
+            "numpy",
+            "pandas",
+            "scipy",
+            "matplotlib",
+            "seaborn",
+            "plotly",
+            "bokeh",
+            "jupyter",
+            "notebook",
+            "ipykernel",
+            "polars",
+            "pyarrow",
+            "statsmodels",
+            "scikit-learn",
+        }
+    ),
+    "machine-learning": frozenset(
+        {
+            "torch",
+            "tensorflow",
+            "keras",
+            "jax",
+            "transformers",
+            "scikit-learn",
+            "xgboost",
+            "lightgbm",
+            "onnx",
+            "datasets",
+            "accelerate",
+        }
+    ),
+    "web-api": frozenset(
+        {
+            "flask",
+            "django",
+            "fastapi",
+            "starlette",
+            "uvicorn",
+            "gunicorn",
+            "aiohttp",
+            "sqlalchemy",
+            "celery",
+            "djangorestframework",
+            "tornado",
+            "bottle",
+        }
+    ),
+    "scraping-automation": frozenset(
+        {
+            "scrapy",
+            "selenium",
+            "playwright",
+            "beautifulsoup4",
+            "lxml",
+            "requests",
+            "httpx",
+            "twisted",
+            "paramiko",
+            "netmiko",
+        }
+    ),
+    "gui-desktop": frozenset(
+        {
+            "pyside6",
+            "pyqt6",
+            "kivy",
+            "wxpython",
+            "pygobject",
+            "dearpygui",
+            "arcade",
+            "pygame",
+            "imgui",
+        }
+    ),
+    "dev-tooling": frozenset(
+        {
+            "pytest",
+            "black",
+            "mypy",
+            "ruff",
+            "flake8",
+            "isort",
+            "pylint",
+            "pre-commit",
+            "coverage",
+            "tox",
+            "nox",
+            "pip-audit",
+            "bandit",
+        }
+    ),
+}
+
+
+def infer_purpose(names: Iterable[str]) -> str:
+    """The most likely purpose of an environment, from the packages it has.
+
+    Returns a stable identifier (``"data-science"``, ``"web-api"``) or
+    ``"general"`` when nothing wins. Each purpose votes once per one of its
+    signal packages that is installed; the most hits wins. Ties go to the
+    purpose whose signal set is the better covered - two hits out of a tight
+    category say more than two out of a broad one - and then to the earlier
+    entry, so the same environment never guesses differently on two refreshes.
+    """
+    installed = {_normalized(name) for name in names}
+    if not installed:
+        return "general"
+
+    best_purpose = "general"
+    best_hits = 0
+    best_coverage = 0.0
+
+    for purpose, signals in _PURPOSE_SIGNALS.items():
+        hits = len(signals & installed)
+        if not hits:
+            continue
+        coverage = hits / len(signals)
+        if (hits, coverage) > (best_hits, best_coverage):
+            best_purpose = purpose
+            best_hits = hits
+            best_coverage = coverage
+
+    return best_purpose

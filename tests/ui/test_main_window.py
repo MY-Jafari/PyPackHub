@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
 
 from pypackhub.core.settings import ColorTheme, Language
 from pypackhub.ui.app import build_window, register_bundled_fonts
@@ -29,6 +29,7 @@ from pypackhub.ui.views.main_window import (
     MainWindow,
     PlaceholderView,
 )
+from pypackhub.ui.views.settings import PACKAGE_MANAGER_CHOICES
 from pypackhub.ui.views.window_shell import QSettingsStore, WindowShell
 
 pytestmark = pytest.mark.gui
@@ -86,39 +87,14 @@ def test_the_content_stack_has_one_page_per_destination(window: MainWindow) -> N
     stack = window.centralWidget().findChild(QStackedWidget)
     assert stack is not None
     page_entries = [entry for entry in NAVIGATION if entry.kind is EntryKind.PAGE]
-    # The stack includes one page per PAGE-kind navigation entry, including
-    # both placeholder pages for unavailable destinations and real views for
-    # available ones. Security (available) now has a real view, so it is no
-    # longer counted as a placeholder.
-    # The stack should have one page per PAGE-kind navigation entry.
-    # Available entries get real views (no placeholder).
-    # Unavailable entries keep their placeholder.
-    # Stub views for available entries that aren't fully implemented
-    # (SEARCH, DEPENDENCIES, HISTORY) are still PlaceholderView instances.
-    # Security now has a real SecurityView, so it's no longer a placeholder.
     assert stack.count() == len(page_entries)
 
-    placeholders = [
-        stack.widget(index)
-        for index in range(stack.count())
-        if isinstance(stack.widget(index), PlaceholderView)
-    ]
-    available_entries = [entry for entry in page_entries if entry.available]
-    # Available entries that still have placeholder/stub views:
-    # SEARCH, DEPENDENCIES, HISTORY (not fully implemented yet)
-    still_stubs = [entry for entry in available_entries if entry.name in {
-        ViewName.SEARCH,
-        ViewName.DEPENDENCIES,
-        ViewName.HISTORY,
-    }]
-    # Total placeholders = (unavailable entries) + (available entries with stubs)
-    # Unavailable entries = page_entries - available_entries
-    # Available entries with stubs = still_stubs
-    # So: placeholders = (page_entries - available_entries) + still_stubs
-    expected_placeholders = (
-        len(page_entries) - len(available_entries) + len(still_stubs)
-    )
-    assert len(placeholders) == expected_placeholders
+    pages = [stack.widget(index) for index in range(stack.count())]
+    # Every destination has its real view now, so no placeholder is left behind,
+    # and no destination is registered twice under two pages: a replaced page that
+    # stays in the stack is a page the user can never reach again.
+    assert not [page for page in pages if isinstance(page, PlaceholderView)]
+    assert len(set(pages)) == len(pages)
 
 
 def test_unbuilt_destinations_are_disabled_and_explain_themselves(
@@ -181,44 +157,33 @@ def test_language_switch_retranslates_the_navigation(window: MainWindow) -> None
     assert "Packages" in _nav_labels(window)
 
 
-def test_language_switch_retranslates_the_placeholder_pages(window: MainWindow) -> None:
+def _visible_labels(page: QWidget) -> list[str]:
+    """Every non-empty label text on one page, in child order."""
+    return [label.text() for label in page.findChildren(QLabel) if label.text()]
+
+
+def test_language_switch_re_renders_every_registered_page(window: MainWindow) -> None:
+    """Every page follows the language, not only the sidebar and the placeholders.
+
+    The pass used to name the views that existed when it was written, so Search,
+    History, Security, Snapshots, Environments and the dashboard kept the previous
+    language while the navigation switched around them. A half-translated window
+    is worse than one that does not translate at all, which is why this checks
+    every registered page rather than one of them.
+    """
     stack = window.centralWidget().findChild(QStackedWidget)
     assert stack is not None
+    pages = [stack.widget(index) for index in range(stack.count())]
 
-    def _body(page: QWidget) -> str:
-        if isinstance(page, PlaceholderView):
-            return page.body_text
-        if hasattr(page, "_stub_body"):
-            return page._stub_body.text()
-        return ""
+    window.retranslate()
+    before = [(page, _visible_labels(page)) for page in pages]
+    assert all(texts for _, texts in before), "a page with no text proves nothing"
 
-    page = next(
-        (stack.widget(i) for i in range(stack.count()) if _body(stack.widget(i))),
-        None,
-    )
-    assert page is not None
-    assert _body(page)
-
-    english_body = _body(page)
     window.toggle_language()
-    assert _body(page) != english_body
 
-    # The dashboard body text is now coming from the DashboardView widget
-    # instead of the placeholder text. The widget displays stats that aren't
-    # translated until the inventory is loaded, so we check the body is
-    # non-empty and different from English instead of matching a key.
-    dashboard_body = _body(page)
-    assert dashboard_body != english_body
-    assert dashboard_body != ""
-
-
-
+    stale = [type(page).__name__ for page, texts in before if _visible_labels(page) == texts]
+    assert stale == []
     assert window.windowTitle() == PERSIAN_TITLE
-
-
-def page_body_key(window: MainWindow, name: ViewName) -> str:
-    """The translation key of a destination's placeholder body."""
-    return next(entry.placeholder_key for entry in NAVIGATION if entry.name is name)
 
 
 def test_sidebar_can_be_hidden_and_shown_again(window: MainWindow) -> None:
@@ -255,3 +220,18 @@ def test_a_second_window_restores_the_stored_theme(store: QSettingsStore) -> Non
     second = build_window(store=store)
     assert second.shell.settings.theme is expected
     assert second.shell.active_theme.name in {ThemeName.LIGHT, ThemeName.DARK}
+
+
+def test_picking_a_package_manager_applies_to_the_running_window(window: MainWindow) -> None:
+    """The settings page's choice reaches the context the views share, mid-session.
+
+    The page used to ask the shell for a context it never had, so the change was
+    silently skipped and only a restart honoured the new manager. The window now
+    hands the page its own context, which is what this holds in place.
+    """
+    assert window.context.package_manager == "auto"
+
+    window._settings_view._package_manager.setCurrentIndex(PACKAGE_MANAGER_CHOICES.index("uv"))
+
+    assert window.shell.settings.package_manager == "uv"
+    assert window.context.package_manager == "uv"

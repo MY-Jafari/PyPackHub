@@ -36,7 +36,13 @@ from typing import Final
 from packaging.version import InvalidVersion, Version
 
 from pypackhub.core.platform_guard import InterpreterFacts, ModificationPolicy
-from pypackhub.core.runner import DEFAULT_TIMEOUT, CommandResult, format_argument, run
+from pypackhub.core.runner import (
+    DEFAULT_TIMEOUT,
+    CommandResult,
+    format_argument,
+    run,
+    run_elevated,
+)
 from pypackhub.core.secrets import redact
 from pypackhub.core.validation import (
     Reason,
@@ -318,6 +324,24 @@ class Backend(ABC):
             on_stdout=on_line,
             on_stderr=on_line,
         )
+
+    def execute_elevated(
+        self,
+        plan: CommandPlan,
+        *,
+        cancel: threading.Event | None = None,
+        timeout: float | None = DEFAULT_TIMEOUT,
+    ) -> CommandResult:
+        """Run a confirmed plan through the OS's standard elevation mechanism.
+
+        The plan's own argument list runs and nothing else: the command is the
+        one the user approved, only the privileges it is granted differ (SPEC
+        section 11.5 - one action, explained beforehand, never persisted).
+        Output streaming is deliberately absent from the signature: the
+        platforms whose consent boundary carries no pipes would turn it into
+        a lie, and the caller tells the user that instead.
+        """
+        return run_elevated(plan.argv, timeout=timeout, cancel=cancel)
 
     def policy_for(self, facts: InterpreterFacts) -> ModificationPolicy:
         """Default policy delegate: most backends only need the platform guard."""

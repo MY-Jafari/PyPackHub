@@ -216,6 +216,49 @@ class HttpClient:
                 f"GET {redact(url)} did not return valid JSON: {redact(str(error))}"
             ) from error
 
+    def post_json(self, url: str, payload: Any, *, max_bytes: int | None = None) -> Any:
+        """POST a JSON document and parse the JSON response.
+
+        The same rules as :meth:`get_json`, plus the request body: it is
+        serialised here from a plain structure - never accepted as a pre-built
+        string - so a caller cannot smuggle malformed content into a request by
+        accident. The response is streamed and size-capped exactly like a GET,
+        because a hostile server answers POSTs too.
+        """
+        safe_url = validate_request_url(url, allow_insecure_http=self.allow_insecure_http)
+        limit = self.max_bytes if max_bytes is None else max_bytes
+        body = json.dumps(payload).encode("utf-8")
+
+        collected = bytearray()
+
+        try:
+            with self._client.stream(
+                "POST",
+                safe_url,
+                content=body,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                if response.status_code >= httpx.codes.BAD_REQUEST:
+                    raise HttpError(f"POST {redact(safe_url)} returned HTTP {response.status_code}")
+
+                for chunk in response.iter_bytes(_CHUNK_SIZE):
+                    collected.extend(chunk)
+                    if len(collected) > limit:
+                        raise ResponseTooLargeError(
+                            f"POST {redact(safe_url)} exceeded the {limit} byte response limit"
+                        )
+        except httpx.HTTPError as error:
+            raise HttpError(f"POST {redact(safe_url)} failed: {redact(str(error))}") from error
+
+        text = bytes(collected).decode("utf-8", errors="replace")
+
+        try:
+            return json.loads(text)
+        except ValueError as error:
+            raise MalformedResponseError(
+                f"POST {redact(safe_url)} did not return valid JSON: {redact(str(error))}"
+            ) from error
+
 
 #: Exception types that mean "the network is not there right now" rather than
 #: "the request was wrong". Callers fall back to a cache and stay quiet.

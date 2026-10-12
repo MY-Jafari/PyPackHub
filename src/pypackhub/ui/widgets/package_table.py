@@ -411,7 +411,10 @@ class PackageFilterProxy(QSortFilterProxyModel):
             return False
 
         if self._outdated_only and not row.is_outdated:
-            return False
+            # A package whose lookups have not answered yet stays visible: it might
+            # be outdated, and hiding every unasked row would empty the table for
+            # as long as the index takes to answer.
+            return row.status is PackageStatus.UNKNOWN
 
         if not self._query:
             return True

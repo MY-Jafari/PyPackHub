@@ -11,7 +11,9 @@ by the CLI companion and the test suite.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -63,6 +65,14 @@ class TaskResult:
     progress: TaskProgress
     payload: Any = None
     error: str = ""
+    #: When the task finished (``time.time()``). Zero until then, which is how
+    #: a caller can tell "not finished" from "finished long ago".
+    timestamp: float = 0.0
+    #: Caller-supplied context for the history: what the task was about, beyond
+    #: its label. The packages view fills this in for changing actions - the
+    #: action kind, the names it touched, the snapshot taken before it - so
+    #: the history page can offer an undo without re-parsing command lines.
+    meta: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 class TaskCancelledError(Exception):
@@ -104,6 +114,7 @@ class TaskManager:
         *,
         on_progress: Callable[[str, TaskProgress], None] | None = None,
         on_finish: Callable[[str, TaskResult], None] | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> str:
         """Schedule a task and return its id.
 
@@ -111,6 +122,8 @@ class TaskManager:
         helper :func:`wait_for_cancel` or read the event passed to it directly.
         ``on_progress`` and ``on_finish`` are called on that same thread, so
         they must be quick or shunt work to the main thread themselves.
+        ``meta`` is recorded on the result untouched, for the caller's own
+        history - the task manager never reads it.
         """
         task_id = f"task-{self._next_id}"
         self._next_id += 1
@@ -118,6 +131,7 @@ class TaskManager:
         cancel = threading.Event()
         state: JobState = JobState.PENDING
         progress = TaskProgress()
+        recorded_meta = dict(meta) if meta else {}
 
         def runner() -> None:
             nonlocal state, progress
@@ -131,6 +145,8 @@ class TaskManager:
                     state=state,
                     progress=progress,
                     payload=payload,
+                    timestamp=time.time(),
+                    meta=recorded_meta,
                 )
             except TaskCancelled:
                 state = JobState.CANCELLED
@@ -138,6 +154,8 @@ class TaskManager:
                     state=state,
                     progress=progress,
                     error="cancelled",
+                    timestamp=time.time(),
+                    meta=recorded_meta,
                 )
             except Exception as error:
                 state = JobState.FAILED
@@ -145,6 +163,8 @@ class TaskManager:
                     state=state,
                     progress=progress,
                     error=str(error),
+                    timestamp=time.time(),
+                    meta=recorded_meta,
                 )
 
             with self._lock:

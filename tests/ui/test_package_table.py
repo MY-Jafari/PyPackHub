@@ -251,14 +251,23 @@ def test_filter_narrows_to_the_requested_rows(
     assert proxy.rowCount() == 3
 
 
-def test_outdated_filter_uses_the_status(
+def test_outdated_filter_hides_only_what_is_known_to_be_current(
     table: tuple[PackageTableModel, PackageFilterProxy],
 ) -> None:
+    """Unknown is not up to date: a row the index has not answered for is kept.
+
+    Hiding it would empty the table for the whole time the lookups take, which is
+    exactly when the filter is most likely to be switched on.
+    """
+
     _, proxy = table
 
     proxy.set_outdated_only(True)
-    assert proxy.rowCount() == 1
-    assert proxy.index(0, 0).data() == "requests"
+    # The order is the source order: no sort column has been chosen here.
+    assert [proxy.index(row, 0).data() for row in range(proxy.rowCount())] == [
+        "requests",
+        "mystery",
+    ]
 
 
 def test_version_column_sorts_as_a_version(qapp: QApplication, tmp_path: Path) -> None:

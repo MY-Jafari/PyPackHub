@@ -48,6 +48,7 @@ from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.dialogs import RemovalPreviewDialog
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["DependenciesView"]
 
@@ -249,7 +250,7 @@ class DependenciesView(QWidget):
         self._scan_task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.DEPS_TITLE),
             work,
-            on_finish=lambda _task_id, result: self.graph_ready.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.graph_ready, result),
         )
 
     def _on_graph_ready(self, result: TaskResult) -> None:

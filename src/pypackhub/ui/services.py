@@ -55,6 +55,14 @@ class DefaultInventoryProvider:
         self._search_working_directory = search_working_directory
         self._package_manager = package_manager
 
+    def set_package_manager(self, package_manager: str) -> None:
+        """Record the backend the user forced for the environments.
+
+        The rest of the provider's configuration is kept: switching the package
+        manager must not quietly turn environment discovery off as a side effect.
+        """
+        self._package_manager = package_manager
+
     def create(self, prefix: Path) -> InventoryService:
         return InventoryService(
             prefix=prefix,
@@ -126,13 +134,17 @@ class UiContext:
         return self._package_manager
 
     def set_package_manager(self, package_manager: str) -> None:
-        """Update the default backend choice and clear cached services."""
+        """Update the default backend choice and clear cached services.
+
+        The provider is updated *in place* when it knows how, rather than being
+        replaced: a test's fake provider must survive the change (and so must any
+        provider configured with more than its default search settings), and only
+        the services - which were built for the previous choice - are thrown away.
+        """
         self._package_manager = package_manager
-        self.provider = DefaultInventoryProvider(
-            package_manager=package_manager,
-            prefer_uv=True,
-            search_working_directory=True,
-        )
+        update = getattr(self.provider, "set_package_manager", None)
+        if callable(update):
+            update(package_manager)
         self._services.clear()
 
     def set_default_environment(self, prefix: Path) -> None:

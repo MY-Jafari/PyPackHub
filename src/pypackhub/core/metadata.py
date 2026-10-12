@@ -18,11 +18,20 @@ The reader here is deliberately small and strict:
 ``scan`` reads every distribution once and returns an index, which is what makes
 "required-by" answerable: it is built from the union of every ``Requires-Dist``
 in the environment, not from a second network call.
+
+A base interpreter has **two** package directories, not one: its own, and the user
+site directory that ``pip install --user`` writes to. On an all-users Windows
+install the second one holds almost everything, because the interpreter refuses to
+write into the first, so a reader that only looks inside the prefix can show
+hundreds of packages with no metadata, no size and no dependency edges at all.
 """
 
 from __future__ import annotations
 
+import contextlib
 import email
+import os
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from email.message import Message
@@ -31,13 +40,17 @@ from typing import Final
 
 from packaging.requirements import InvalidRequirement, Requirement
 
+from pypackhub.core.platform_guard import EnvironmentKind, inspect
+
 __all__ = [
     "InstalledMetadataIndex",
     "PackageMetadata",
     "distribution_directories",
     "normalize_name",
+    "own_site_packages_directories",
     "read_metadata",
     "scan",
+    "site_packages_writable",
 ]
 
 #: A ``METADATA`` file larger than this is not metadata any more. The cap keeps a
@@ -103,8 +116,112 @@ class PackageMetadata:
         return normalize_name(self.name)
 
 
-def distribution_directories(prefix: Path) -> tuple[Path, ...]:
-    """Every existing ``site-packages`` directory inside a Python prefix."""
+def _parse_posix_version(name: str) -> tuple[int, int] | None:
+    """``python3.13`` -> ``(3, 13)``."""
+    text = name.removeprefix("python")
+    parts = text.split(".", 1)
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def _parse_windows_version(name: str) -> tuple[int, int] | None:
+    """``python313.dll`` -> ``(3, 13)``."""
+    text = name.removeprefix("python").removesuffix(".dll")
+    if len(text) < 2 or not text.isdigit():
+        return None
+    return int(text[0]), int(text[1:])
+
+
+def _interpreter_version(prefix: Path) -> tuple[int, int] | None:
+    """The ``(major, minor)`` of a base interpreter, read from its own layout.
+
+    Nothing is executed to find this out: a CPython prefix names its version on
+    disk - ``lib/python3.13`` on POSIX, ``python313.dll`` on Windows - and that is
+    all the user site path needs to be worked out.
+    """
+    patterns = (
+        ("lib/python3.*", _parse_posix_version),
+        ("lib64/python3.*", _parse_posix_version),
+        ("python3*.dll", _parse_windows_version),
+    )
+
+    for pattern, parse in patterns:
+        for candidate in sorted(prefix.glob(pattern)):
+            version = parse(candidate.name)
+            if version is not None:
+                return version
+
+    return None
+
+
+def _user_site_directories(prefix: Path) -> tuple[Path, ...]:
+    """The user site directories that belong to a *base* interpreter.
+
+    ``pip install --user`` writes outside the prefix, and a virtual environment is
+    left alone on purpose: pip inside one ignores the user site, so including it
+    here would attribute another environment's packages to this one.
+    """
+    if (prefix / "pyvenv.cfg").is_file():
+        return ()
+
+    version = _interpreter_version(prefix)
+    if version is None:
+        return ()
+
+    major, minor = version
+    candidates: list[Path] = []
+
+    override = os.environ.get("PYTHONUSERBASE")
+    if override:
+        root = Path(override).expanduser()
+        candidates.extend(
+            (
+                root / f"Python{major}{minor}" / "site-packages",
+                root / "lib" / f"python{major}.{minor}" / "site-packages",
+            )
+        )
+
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / "Python" / f"Python{major}{minor}" / "site-packages")
+
+    home = Path.home()
+    candidates.append(home / ".local" / "lib" / f"python{major}.{minor}" / "site-packages")
+    if sys.platform == "darwin":
+        candidates.append(
+            home / "Library" / "Python" / f"{major}.{minor}" / "lib" / "python" / "site-packages"
+        )
+
+    return tuple(candidate for candidate in candidates if candidate.is_dir())
+
+
+def _dedupe_directories(paths: list[Path]) -> tuple[Path, ...]:
+    """Drop directories that repeat through symlinks or ``lib``/``lib64`` twins.
+
+    A virtual environment on POSIX keeps its packages directly under ``lib/``,
+    and the ``lib64`` of several distributions is a symlink back to it, so the
+    same tree is otherwise read once per name it can be reached by.
+    """
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return tuple(unique)
+
+
+def own_site_packages_directories(prefix: Path) -> tuple[Path, ...]:
+    """The prefix's own existing ``site-packages`` directories.
+
+    These are the directories a package manager writes into on behalf of this
+    environment. The user site directory is deliberately absent: it belongs
+    to the *user*, not to the interpreter, and no code that means "where does
+    this environment keep its packages" may be answered with it.
+    """
     found: list[Path] = []
 
     for pattern in _SITE_PACKAGE_GLOBS:
@@ -115,18 +232,65 @@ def distribution_directories(prefix: Path) -> tuple[Path, ...]:
             if candidate.is_dir():
                 found.append(candidate)
 
-    # A virtual environment on POSIX keeps its packages directly under lib/, and
-    # `<prefix>/lib/python3.X/plat-…` layouts repeat the same directory; dedupe.
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in found:
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        unique.append(path)
+    return _dedupe_directories(found)
 
-    return tuple(unique)
+
+def distribution_directories(prefix: Path) -> tuple[Path, ...]:
+    """Every existing ``site-packages`` directory that belongs to a prefix.
+
+    That is the prefix's own directories plus, for a real base interpreter, the
+    user site directory its ``--user`` installs land in. A directory tree with no
+    interpreter in it is not a base interpreter, so nothing is added for it: a
+    test fixture, or an environment whose interpreter was removed, keeps answering
+    for itself alone.
+    """
+    found: list[Path] = list(own_site_packages_directories(prefix))
+
+    facts = inspect(prefix)
+    if facts.kind is EnvironmentKind.SYSTEM and facts.executable is not None:
+        found.extend(_user_site_directories(prefix))
+
+    return _dedupe_directories(found)
+
+
+def site_packages_writable(prefix: Path) -> bool:
+    """Whether the current user can write into *prefix*'s own site-packages.
+
+    This is the fact behind "uv needs administrator privileges": a backend with
+    no user-site path of its own can only write the environment's own
+    site-packages, and on an all-users install that directory is exactly the
+    one a normal user may not change - ``Program Files`` on Windows,
+    ``/usr/lib`` elsewhere. pip needs no help there because it falls back to
+    the user site; that fallback is why the *user site* directories are not
+    part of this answer.
+
+    ``os.access`` is not the test: on Windows it reads the read-only file
+    attribute rather than the ACLs, and happily reports "writable" for a
+    ``Program Files`` directory the current user cannot write into at all.
+    Creating and removing a probe file is the honest test on every platform.
+
+    An environment with no own site-packages directory is not refused here:
+    the package manager will produce its own, more precise error, and
+    inventing an elevation request to answer a guess would be worse.
+    """
+    directories = own_site_packages_directories(prefix)
+    if not directories:
+        return True
+
+    return any(_directory_is_writable(directory) for directory in directories)
+
+
+def _directory_is_writable(directory: Path) -> bool:
+    """Whether a file can be created inside *directory* right now."""
+    probe = directory / ".pypackhub-write-probe"
+    try:
+        probe.write_text("", encoding="utf-8")
+    except OSError:
+        return False
+
+    with contextlib.suppress(OSError):
+        probe.unlink()
+    return True
 
 
 def _dist_info_directories(prefix: Path) -> Iterator[Path]:

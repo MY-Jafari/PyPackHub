@@ -65,6 +65,9 @@ class TranslationKey(str, Enum):
     SEARCH_INSTALL = "search.install"
     SEARCH_INSTALLED_VERSION = "search.installed_version"
     SEARCH_LATEST_VERSION = "search.latest_version"
+    SEARCH_PLACEHOLDER = "search.placeholder"
+    SEARCH_INSTALL_LATEST = "search.install_latest"
+    SEARCH_INSTALL_SELECTED = "search.install_selected"
     NAV_SECURITY = "nav.security"
     SECURITY_TITLE = "security.title"
     SECURITY_SCANNING = "security.scanning"
@@ -85,6 +88,12 @@ class TranslationKey(str, Enum):
     SECURITY_START_SCAN = "security.start_scan"
     SECURITY_STOP_SCAN = "security.stop_scan"
     SECURITY_SCANNING_IN_PROGRESS = "security.scanning_in_progress"
+    SECURITY_LAST_SCAN = "security.last_scan"
+    SECURITY_FIX = "security.fix"
+    SECURITY_ADVISORY = "security.advisory"
+    SECURITY_OPEN_ADVISORY = "security.open_advisory"
+    SECURITY_SCAN_OFFLINE = "security.scan_offline"
+    SECURITY_INTRO = "security.intro"
     NAV_SNAPSHOTS = "nav.snapshots"
     SNAPSHOTS_TITLE = "snapshots.title"
     SNAPSHOTS_LIST = "snapshots.list"
@@ -102,6 +111,16 @@ class TranslationKey(str, Enum):
     SNAPSHOTS_ENVIRONMENT = "snapshots.environment"
     SNAPSHOTS_TIME = "snapshots.time"
     SNAPSHOTS_PACKAGES = "snapshots.packages"
+    SNAPSHOTS_AUTOMATIC = "snapshots.automatic"
+    SNAPSHOTS_MANUAL = "snapshots.manual"
+    SNAPSHOTS_REASON = "snapshots.reason"
+    SNAPSHOTS_REFRESH = "snapshots.refresh"
+    SNAPSHOTS_INTRO = "snapshots.intro"
+    RESTORE_TITLE = "restore.title"
+    RESTORE_REINTRODUCE = "restore.reintroduce"
+    RESTORE_REMOVE = "restore.remove"
+    RESTORE_EMPTY = "restore.empty"
+    RESTORE_NOT_READY = "restore.not_ready"
     NAV_HISTORY = "nav.history"
     HISTORY_TITLE = "history.title"
     HISTORY_ACTIONS = "history.actions"
@@ -115,6 +134,9 @@ class TranslationKey(str, Enum):
     HISTORY_SUCCESS = "history.success"
     HISTORY_FAILED = "history.failed"
     HISTORY_CANCELLED = "history.cancelled"
+    HISTORY_UNDO = "history.undo"
+    HISTORY_UNDO_UNAVAILABLE = "history.undo_unavailable"
+    HISTORY_INTRO = "history.intro"
     NAV_LOGS = "nav.logs"
     NAV_SETTINGS = "nav.settings"
 
@@ -130,6 +152,17 @@ class TranslationKey(str, Enum):
     DASHBOARD_READY = "dashboard.ready"
     DASHBOARD_ENVIRONMENT_UNKNOWN = "dashboard.environment_unknown"
     DASHBOARD_THIS_WEEK_FOLDER = "dashboard.this_week_folder"
+    DASHBOARD_ORPHANS = "dashboard.orphans"
+    DASHBOARD_VULNERABLE = "dashboard.vulnerable"
+    DASHBOARD_PURPOSE = "dashboard.purpose"
+    DASHBOARD_SIZE = "dashboard.size"
+    PURPOSE_DATA_SCIENCE = "purpose.data_science"
+    PURPOSE_MACHINE_LEARNING = "purpose.machine_learning"
+    PURPOSE_WEB_API = "purpose.web_api"
+    PURPOSE_SCRAPING_AUTOMATION = "purpose.scraping_automation"
+    PURPOSE_GUI_DESKTOP = "purpose.gui_desktop"
+    PURPOSE_DEV_TOOLING = "purpose.dev_tooling"
+    PURPOSE_GENERAL = "purpose.general"
 
     MENU_VIEW = "menu.view"
     MENU_VIEW_SIDEBAR = "menu.view.sidebar"
@@ -187,6 +220,7 @@ class TranslationKey(str, Enum):
     SETTINGS_CONFIRM_UPGRADE = "settings.confirm_upgrade"
     SETTINGS_PACKAGE_MANAGER = "settings.package_manager"
     SETTINGS_PACKAGE_MANAGER_HINT = "settings.package_manager_hint"
+    SETTINGS_PACKAGE_MANAGER_AUTO = "settings.package_manager_auto"
     SETTINGS_SAVE = "settings.save"
     SETTINGS_CANCEL = "settings.cancel"
 
@@ -251,6 +285,7 @@ class TranslationKey(str, Enum):
     PACKAGES_DOWNGRADE = "packages.downgrade"
     PACKAGES_NO_SELECTION = "packages.no_selection"
     PACKAGES_REFRESHING = "packages.refreshing"
+    PACKAGES_LOADING_LATEST = "packages.loading_latest"
     PACKAGES_CHECKING = "packages.checking"
     PACKAGES_MEASURING = "packages.measuring"
     PACKAGES_CANCELLED = "packages.cancelled"
@@ -283,6 +318,15 @@ class TranslationKey(str, Enum):
     CONFIRM_ENVIRONMENT = "confirm.environment"
     CONFIRM_AFFECTED = "confirm.affected"
     CONFIRM_WARNING = "confirm.warning"
+    CONFIRM_ELEVATION_TITLE = "confirm.elevation.title"
+    CONFIRM_ELEVATION_REASON = "confirm.elevation.reason"
+    CONFIRM_ELEVATION_NOTE = "confirm.elevation.note"
+    CONFIRM_ELEVATION_BUTTON = "confirm.elevation.button"
+    ELEVATION_UNAVAILABLE = "elevation.unavailable"
+    ELEVATION_NO_OUTPUT = "elevation.no_output"
+    CONFIRM_FALLBACK_TITLE = "confirm.fallback.title"
+    CONFIRM_FALLBACK_REASON = "confirm.fallback.reason"
+    CONFIRM_FALLBACK_BUTTON = "confirm.fallback.button"
 
     BLOCKED_TITLE = "blocked.title"
     BLOCKED_SUGGESTION = "blocked.suggestion"
@@ -391,20 +435,24 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.TOPBAR_NO_ENVIRONMENT: "No environment selected",
     TranslationKey.VIEW_EMPTY_TITLE: "Nothing here yet",
     TranslationKey.VIEW_EMPTY_BODY: "This view arrives in the next section of the build.",
-    TranslationKey.    VIEW_PLACEHOLDER_DASHBOARD: (
+    TranslationKey.VIEW_PLACEHOLDER_DASHBOARD: (
         "Package counts, outdated and vulnerable totals, and the environment's purpose "
         "appear here once the package list is wired up."
     ),
-    TranslationKey.DASHBOARD_UNABLE_TO_LOADING: (
-        "Unable to load dashboard data due to an error."
-    ),
-    TranslationKey.DASHBOARD_LOADING: (
-        "Loading dashboard data..."
-    ),
-    TranslationKey.DASHBOARD_THIS_WEEK_FOLDER: (
-        "This week folder"
-    ),
-
+    TranslationKey.DASHBOARD_UNABLE_TO_LOADING: ("Unable to load dashboard data due to an error."),
+    TranslationKey.DASHBOARD_LOADING: ("Loading dashboard data..."),
+    TranslationKey.DASHBOARD_THIS_WEEK_FOLDER: ("This week folder"),
+    TranslationKey.DASHBOARD_ORPHANS: "Orphan packages",
+    TranslationKey.DASHBOARD_VULNERABLE: "Vulnerable packages",
+    TranslationKey.DASHBOARD_PURPOSE: "Likely purpose",
+    TranslationKey.DASHBOARD_SIZE: "Measured size",
+    TranslationKey.PURPOSE_DATA_SCIENCE: "Data science",
+    TranslationKey.PURPOSE_MACHINE_LEARNING: "Machine learning",
+    TranslationKey.PURPOSE_WEB_API: "Web / API development",
+    TranslationKey.PURPOSE_SCRAPING_AUTOMATION: "Scraping & automation",
+    TranslationKey.PURPOSE_GUI_DESKTOP: "GUI / desktop apps",
+    TranslationKey.PURPOSE_DEV_TOOLING: "Development tooling",
+    TranslationKey.PURPOSE_GENERAL: "General purpose",
     TranslationKey.VIEW_PLACEHOLDER_PACKAGES: (
         "The installed-package table, its filters and its actions arrive in section 4."
     ),
@@ -414,7 +462,7 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.VIEW_PLACEHOLDER_DEPENDENCIES: (
         "The dependency tree and reverse-dependency view arrive in phase 2."
     ),
-    TranslationKey.    VIEW_PLACEHOLDER_SEARCH: (
+    TranslationKey.VIEW_PLACEHOLDER_SEARCH: (
         "Searching PyPI and browsing a package's release history arrive in phase 2."
     ),
     TranslationKey.SEARCH_TITLE: "Search packages",
@@ -433,8 +481,10 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SEARCH_INSTALL: "Install",
     TranslationKey.SEARCH_INSTALLED_VERSION: "Installed version",
     TranslationKey.SEARCH_LATEST_VERSION: "Latest version",
-
-    TranslationKey.    VIEW_PLACEHOLDER_SECURITY: (
+    TranslationKey.SEARCH_PLACEHOLDER: "Search PyPI packages...",
+    TranslationKey.SEARCH_INSTALL_LATEST: "Install latest",
+    TranslationKey.SEARCH_INSTALL_SELECTED: "Install selected version",
+    TranslationKey.VIEW_PLACEHOLDER_SECURITY: (
         "Vulnerability scanning, and the snapshot taken before every fix, arrive in phase 4."
     ),
     TranslationKey.SECURITY_TITLE: "Security",
@@ -456,8 +506,18 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SECURITY_START_SCAN: "Start scan",
     TranslationKey.SECURITY_STOP_SCAN: "Stop scan",
     TranslationKey.SECURITY_SCANNING_IN_PROGRESS: "Scanning in progress...",
-
-    TranslationKey.    VIEW_PLACEHOLDER_SNAPSHOTS: (
+    TranslationKey.SECURITY_LAST_SCAN: "Last scanned: %(time)s",
+    TranslationKey.SECURITY_FIX: "Upgrade to fix",
+    TranslationKey.SECURITY_ADVISORY: "Advisory",
+    TranslationKey.SECURITY_OPEN_ADVISORY: "Open advisory",
+    TranslationKey.SECURITY_SCAN_OFFLINE: (
+        "The vulnerability database could not be reached; the scan may be incomplete."
+    ),
+    TranslationKey.SECURITY_INTRO: (
+        "Checks the installed packages against the OSV.dev vulnerability database. "
+        "Only package names and their versions are sent, and only when you press the button."
+    ),
+    TranslationKey.VIEW_PLACEHOLDER_SNAPSHOTS: (
         "Environment snapshots and rollback with a preview diff arrive in phase 4."
     ),
     TranslationKey.SNAPSHOTS_TITLE: "Snapshots",
@@ -476,8 +536,28 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SNAPSHOTS_ENVIRONMENT: "Environment",
     TranslationKey.SNAPSHOTS_TIME: "Time",
     TranslationKey.SNAPSHOTS_PACKAGES: "Packages",
-
-    TranslationKey.    VIEW_PLACEHOLDER_HISTORY: (
+    TranslationKey.SNAPSHOTS_AUTOMATIC: "Automatic",
+    TranslationKey.SNAPSHOTS_MANUAL: "Manual",
+    TranslationKey.SNAPSHOTS_REASON: "Reason",
+    TranslationKey.SNAPSHOTS_REFRESH: "Refresh",
+    TranslationKey.SNAPSHOTS_INTRO: (
+        "A snapshot records the exact versions installed right now. Restoring one "
+        "shows a preview of every command it will take before anything runs."
+    ),
+    TranslationKey.RESTORE_TITLE: "Restore this environment?",
+    TranslationKey.RESTORE_REINTRODUCE: (
+        "%(count)s package(s) will be restored at their recorded versions:"
+    ),
+    TranslationKey.RESTORE_REMOVE: (
+        "%(count)s package(s) that arrived after the snapshot will be removed:"
+    ),
+    TranslationKey.RESTORE_EMPTY: (
+        "Nothing to restore: the environment already matches the snapshot."
+    ),
+    TranslationKey.RESTORE_NOT_READY: (
+        "The package list is not loaded yet; it is being refreshed."
+    ),
+    TranslationKey.VIEW_PLACEHOLDER_HISTORY: (
         "The action history and undo arrive with snapshots in phase 4."
     ),
     TranslationKey.HISTORY_TITLE: "History",
@@ -492,7 +572,16 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.HISTORY_SUCCESS: "Success",
     TranslationKey.HISTORY_FAILED: "Failed",
     TranslationKey.HISTORY_CANCELLED: "Cancelled",
-
+    TranslationKey.HISTORY_UNDO: "Undo",
+    TranslationKey.HISTORY_UNDO_UNAVAILABLE: (
+        "This action cannot be undone: its snapshot is missing, or the environment "
+        "already matches it."
+    ),
+    TranslationKey.HISTORY_INTRO: (
+        "Every changing action is recorded here, each with the automatic snapshot "
+        "taken before it. Undo restores what that snapshot remembers about the "
+        "action's own packages - after a preview of exactly what will run."
+    ),
     TranslationKey.VIEW_PLACEHOLDER_LOGS: (
         "The live terminal panel and the persistent log file arrive with the package "
         "actions in section 4."
@@ -528,8 +617,10 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_CONFIRM_UPGRADE: "Confirm before upgrading",
     TranslationKey.SETTINGS_PACKAGE_MANAGER: "Package manager",
     TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT: (
-        "The program used to install, remove and upgrade packages."
+        "The program used to install, remove and upgrade packages. Automatic "
+        "picks uv when it is installed and falls back to pip when it is not."
     ),
+    TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO: "Automatic (uv first, then pip)",
     TranslationKey.SETTINGS_SAVE: "Save",
     TranslationKey.SETTINGS_CANCEL: "Cancel",
     TranslationKey.CREATE_ENV_TITLE: "Create a virtual environment",
@@ -610,6 +701,9 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.PACKAGES_DOWNGRADE: "Downgrade to a version",
     TranslationKey.PACKAGES_NO_SELECTION: "Select a package first",
     TranslationKey.PACKAGES_REFRESHING: "Refreshing the package list...",
+    TranslationKey.PACKAGES_LOADING_LATEST: (
+        "Loading the latest versions from the package index..."
+    ),
     TranslationKey.PACKAGES_CHECKING: (
         "Checking %(name)s on the package index (%(index)s of %(total)s)"
     ),
@@ -643,6 +737,32 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.CONFIRM_WARNING: (
         "This changes %(environment)s. PyPackHub runs exactly the command above, nothing else."
     ),
+    TranslationKey.CONFIRM_ELEVATION_TITLE: "Administrator privileges needed",
+    TranslationKey.CONFIRM_ELEVATION_REASON: (
+        "%(backend)s has no user-site fallback: it can only write this "
+        "environment's own site-packages, which the current user may not "
+        "change. The command above will run as administrator so that it can."
+    ),
+    TranslationKey.CONFIRM_ELEVATION_NOTE: (
+        "The request covers this one action only. PyPackHub itself stays "
+        "unprivileged and nothing is remembered. (pip can install into your "
+        "user site without elevation, and a virtual environment needs none at all.)"
+    ),
+    TranslationKey.CONFIRM_ELEVATION_BUTTON: "Run as administrator",
+    TranslationKey.ELEVATION_UNAVAILABLE: (
+        "This system cannot run %(backend)s elevated. Use pip instead, or a virtual environment."
+    ),
+    TranslationKey.ELEVATION_NO_OUTPUT: (
+        "Elevated commands cannot stream their output; the log will show the "
+        "result when the command finishes."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_TITLE: "A different package manager is needed for this action",
+    TranslationKey.CONFIRM_FALLBACK_REASON: (
+        "%(backend)s cannot change %(packages)s: the copy Python imports is "
+        "in your user site, where %(backend)s never writes. The same action "
+        "through pip upgrades that copy, without administrator privileges."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_BUTTON: "Run with pip",
     TranslationKey.BLOCKED_TITLE: "This environment cannot be modified",
     TranslationKey.BLOCKED_SUGGESTION: "Suggestion",
     TranslationKey.ENV_NO_MANAGER: (
@@ -749,15 +869,20 @@ FA_TABLE: dict[str, str] = {
         "تعداد بسته‌ها، تعداد بسته‌های به‌روزنشده و آسیب‌پذیر، و کاربرد محیط "
         "پس از آماده شدن فهرست بسته‌ها نمایش داده می‌شود."
     ),
-    TranslationKey.DASHBOARD_UNABLE_TO_LOADING: (
-        "نمی‌تواند داده‌ها را بارگذاری کند."
-    ),
-    TranslationKey.DASHBOARD_LOADING: (
-        "در حال بارگذاری..."
-    ),
-    TranslationKey.DASHBOARD_THIS_WEEK_FOLDER: (
-        "پوشهٔ این هفته"
-    ),
+    TranslationKey.DASHBOARD_UNABLE_TO_LOADING: ("نمی‌تواند داده‌ها را بارگذاری کند."),
+    TranslationKey.DASHBOARD_LOADING: ("در حال بارگذاری..."),
+    TranslationKey.DASHBOARD_THIS_WEEK_FOLDER: ("پوشهٔ این هفته"),
+    TranslationKey.DASHBOARD_ORPHANS: "بسته‌های بی‌نیاز",
+    TranslationKey.DASHBOARD_VULNERABLE: "بسته‌های آسیب‌پذیر",
+    TranslationKey.DASHBOARD_PURPOSE: "کاربرد محتمل",
+    TranslationKey.DASHBOARD_SIZE: "اندازهٔ اندازه‌گیری‌شده",
+    TranslationKey.PURPOSE_DATA_SCIENCE: "علم داده",
+    TranslationKey.PURPOSE_MACHINE_LEARNING: "یادگیری ماشین",
+    TranslationKey.PURPOSE_WEB_API: "توسعهٔ وب / API",
+    TranslationKey.PURPOSE_SCRAPING_AUTOMATION: "خزش و خودکارسازی",
+    TranslationKey.PURPOSE_GUI_DESKTOP: "برنامهٔ دسکتاپ / گرافیکی",
+    TranslationKey.PURPOSE_DEV_TOOLING: "ابزار توسعه",
+    TranslationKey.PURPOSE_GENERAL: "کاربرد عمومی",
     TranslationKey.VIEW_PLACEHOLDER_PACKAGES: (
         "جدول بسته‌های نصب‌شده، فیلترها و عمل‌های آن در مرحله ۴ اضافه می‌شود."
     ),
@@ -786,6 +911,9 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SEARCH_INSTALL: "نصب",
     TranslationKey.SEARCH_INSTALLED_VERSION: "نسخه نصب‌شده",
     TranslationKey.SEARCH_LATEST_VERSION: "آخرین نسخه",
+    TranslationKey.SEARCH_PLACEHOLDER: "جست‌وجوی بسته‌های PyPI...",
+    TranslationKey.SEARCH_INSTALL_LATEST: "نصب آخرین نسخه",
+    TranslationKey.SEARCH_INSTALL_SELECTED: "نصب نسخهٔ انتخاب‌شده",
     TranslationKey.VIEW_PLACEHOLDER_SECURITY: (
         "بررسی آسیب‌پذیری‌ها و نقطهٔ بازیابی که پیش از هر اصلاح گرفته می‌شود، در فاز ۴ اضافه می‌شود."
     ),
@@ -796,8 +924,8 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SECURITY_VULNERABILITY: " آسیب‌پذیری",
     TranslationKey.SECURITY_PACKAGE: "بسته",
     TranslationKey.SECURITY_VERSION: "نسخه",
-    TranslationKey.SECURITY_SEVERITY: "خشگیری",
-    TranslationKey.SECURITY_LOW: "پایت",
+    TranslationKey.SECURITY_SEVERITY: "شدت",
+    TranslationKey.SECURITY_LOW: "کم",
     TranslationKey.SECURITY_MEDIUM: "متوسط",
     TranslationKey.SECURITY_HIGH: "بالا",
     TranslationKey.SECURITY_CRITICAL: "حساس",
@@ -808,6 +936,17 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SECURITY_START_SCAN: "شروع اسکن",
     TranslationKey.SECURITY_STOP_SCAN: "توقف اسکن",
     TranslationKey.SECURITY_SCANNING_IN_PROGRESS: "اسکن در حال اجراست...",
+    TranslationKey.SECURITY_LAST_SCAN: "آخرین پویش: %(time)s",
+    TranslationKey.SECURITY_FIX: "ارتقا برای رفع",
+    TranslationKey.SECURITY_ADVISORY: "هشدار امنیتی",
+    TranslationKey.SECURITY_OPEN_ADVISORY: "بازکردن هشدار",
+    TranslationKey.SECURITY_SCAN_OFFLINE: (
+        "به پایگاه دادهٔ آسیب‌پذیری‌ها دسترسی نشد؛ پویش ممکن است ناقص باشد."
+    ),
+    TranslationKey.SECURITY_INTRO: (
+        "بسته‌های نصب‌شده را با پایگاه دادهٔ آسیب‌پذیری‌های OSV.dev مقایسه می‌کند. "
+        "فقط نام بسته‌ها و نسخه‌هایشان ارسال می‌شود و فقط وقتی دکمه را بزنید."
+    ),
     TranslationKey.VIEW_PLACEHOLDER_SNAPSHOTS: (
         "نقاط بازیابی محیط و بازگشت همراه با پیش‌نمایش تغییرات در فاز ۴ اضافه می‌شود."
     ),
@@ -827,6 +966,19 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SNAPSHOTS_ENVIRONMENT: "محیط",
     TranslationKey.SNAPSHOTS_TIME: "زمان",
     TranslationKey.SNAPSHOTS_PACKAGES: "بسته‌ها",
+    TranslationKey.SNAPSHOTS_AUTOMATIC: "خودکار",
+    TranslationKey.SNAPSHOTS_MANUAL: "دستی",
+    TranslationKey.SNAPSHOTS_REASON: "دلیل",
+    TranslationKey.SNAPSHOTS_REFRESH: "تازه‌سازی",
+    TranslationKey.SNAPSHOTS_INTRO: (
+        "نقطهٔ بازیابی، نسخه‌های نصب‌شدهٔ همین لحظه را ضبط می‌کند. بازگردانی یک نقطه، "
+        "پیش از هر اجرا پیش‌نمایش همهٔ فرمان‌هایش را نشان می‌دهد."
+    ),
+    TranslationKey.RESTORE_TITLE: "این محیط بازگردانی شود؟",
+    TranslationKey.RESTORE_REINTRODUCE: "%(count)s بسته با نسخه‌های ضبط‌شده بازگردانده می‌شوند:",
+    TranslationKey.RESTORE_REMOVE: "%(count)s بسته که پس از نقطهٔ بازیابی آمده‌اند حذف می‌شوند:",
+    TranslationKey.RESTORE_EMPTY: "چیزی برای بازگردانی نیست: محیط با نقطهٔ بازیابی یکی است.",
+    TranslationKey.RESTORE_NOT_READY: "فهرست بسته‌ها هنوز بارگذاری نشده؛ در حال تازه‌سازی است.",
     TranslationKey.VIEW_PLACEHOLDER_HISTORY: (
         "تاریخچهٔ کارها و بازگشت آن‌ها همراه با نقاط بازیابی در فاز ۴ اضافه می‌شود."
     ),
@@ -842,6 +994,15 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.HISTORY_SUCCESS: "موفق",
     TranslationKey.HISTORY_FAILED: "ناموفق",
     TranslationKey.HISTORY_CANCELLED: "لغو‌شده",
+    TranslationKey.HISTORY_UNDO: "واگردانی",
+    TranslationKey.HISTORY_UNDO_UNAVAILABLE: (
+        "این کار واگردانی نمی‌شود: نقطهٔ بازیابی‌اش از دست رفته یا محیط همین حالا با آن یکی است."
+    ),
+    TranslationKey.HISTORY_INTRO: (
+        "هر کار تغییردهنده همراه با نقطهٔ بازیابیِ خودکاری که پیش از آن گرفته شده اینجا "
+        "ثبت می‌شود. واگردانی همان چیزی را که آن نقطه دربارهٔ بسته‌های خودِ کار به یاد "
+        "دارد برمی‌گرداند — پس از پیش‌نمایش دقیق آنچه اجرا می‌شود."
+    ),
     TranslationKey.VIEW_PLACEHOLDER_LOGS: (
         "پنل خط فرمان زنده و فایل گزارش پایدار همراه با کارهای بسته‌ها در مرحله ۴ اضافه می‌شود."
     ),
@@ -876,8 +1037,10 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_CONFIRM_UPGRADE: "تأیید قبل از ارتقا",
     TranslationKey.SETTINGS_PACKAGE_MANAGER: "مدیر بسته",
     TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT: (
-        "برنامه‌ای که برای نصب، حذف و ارتقای بسته‌ها استفاده می‌شود."
+        "برنامه‌ای که برای نصب، حذف و ارتقای بسته‌ها استفاده می‌شود. گزینهٔ "
+        "خودکار اگر uv نصب باشد آن را برمی‌گزیند و در غیر این صورت از pip استفاده می‌کند."
     ),
+    TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO: "خودکار (ابتدا uv، سپس pip)",
     TranslationKey.SETTINGS_SAVE: "ذخیره",
     TranslationKey.SETTINGS_CANCEL: "لغو",
     TranslationKey.CREATE_ENV_TITLE: "ساخت محیط مجازی",
@@ -955,6 +1118,7 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.PACKAGES_DOWNGRADE: "نصب نسخه قدیمی‌تر",
     TranslationKey.PACKAGES_NO_SELECTION: "ابتدا یک بسته انتخاب کنید",
     TranslationKey.PACKAGES_REFRESHING: "تازه‌سازی فهرست بسته‌ها...",
+    TranslationKey.PACKAGES_LOADING_LATEST: ("در حال گرفتن آخرین نسخه‌ها از نمایه بسته‌ها..."),
     TranslationKey.PACKAGES_CHECKING: ("بررسی %(name)s در نمایه بسته‌ها (%(index)s از %(total)s)"),
     TranslationKey.PACKAGES_MEASURING: "در حال اندازه‌گیری بسته‌ها...",
     TranslationKey.PACKAGES_CANCELLED: "کار در حال اجرا لغو شد.",
@@ -986,6 +1150,33 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.CONFIRM_WARNING: (
         "این کار %(environment)s را تغییر می‌دهد. پای‌پک‌هاب دقیقاً همان دستور بالا را اجرا می‌کند و بس."
     ),
+    TranslationKey.CONFIRM_ELEVATION_TITLE: "نیاز به دسترسی مدیر",
+    TranslationKey.CONFIRM_ELEVATION_REASON: (
+        "\u200f%(backend)s مسیر جایگزینی برای کاربر عادی ندارد و فقط می‌تواند "
+        "در site-packages خودِ همین محیط بنویسد؛ دایرکتوری‌ای که کاربر عادی "
+        "اجازهٔ تغییرش را ندارد. دستور بالا برای همین کار با دسترسی مدیر اجرا می‌شود."
+    ),
+    TranslationKey.CONFIRM_ELEVATION_NOTE: (
+        "این درخواست فقط برای همین یک کار است؛ خودِ برنامه بدون دسترسی مدیر "
+        "می‌ماند و چیزی برای بعد ذخیره نمی‌شود. (‏pip می‌تواند بدون دسترسی مدیر "
+        "در site کاربر نصب کند، و محیط مجازی اصلاً به آن نیازی ندارد.)"
+    ),
+    TranslationKey.CONFIRM_ELEVATION_BUTTON: "اجرای با دسترسی مدیر",
+    TranslationKey.ELEVATION_UNAVAILABLE: (
+        "این سیستم نمی‌تواند %(backend)s را با دسترسی مدیر اجرا کند. "
+        "به‌جای آن از pip یا محیط مجازی استفاده کنید."
+    ),
+    TranslationKey.ELEVATION_NO_OUTPUT: (
+        "خروجی فرمان‌های اجراشده با دسترسی مدیر به‌صورت زنده نمایش داده "
+        "نمی‌شود؛ نتیجه پس از پایان فرمان در گزارش می‌آید."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_TITLE: "برای این کار به مدیر بستهٔ دیگری نیاز است",
+    TranslationKey.CONFIRM_FALLBACK_REASON: (
+        "\u200f%(backend)s نمی‌تواند %(packages)s را تغییر دهد: نسخه‌ای که "
+        "پایتون آن را بار می‌کند در site کاربر شماست و %(backend)s هرگز آنجا "
+        "نمی‌نویسد. همین کار با pip همان نسخه را ارتقا می‌دهد، بدون دسترسی مدیر."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_BUTTON: "اجرای با pip",
     TranslationKey.BLOCKED_TITLE: "این محیط قابل تغییر نیست",
     TranslationKey.BLOCKED_SUGGESTION: "پیشنهاد",
     TranslationKey.ENV_NO_MANAGER: (

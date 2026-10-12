@@ -46,11 +46,40 @@ __all__ = [
     "CreateEnvironmentDialog",
     "CreateEnvironmentRequest",
     "DowngradeDialog",
+    "ElevationNotice",
+    "FallbackNotice",
     "InstallDialog",
     "RemovalPreviewDialog",
+    "RollbackPreviewDialog",
     "action_button_key",
     "action_title_key",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class ElevationNotice:
+    """What a confirmation has to say about a run that needs the OS's help.
+
+    Carries the *backend* rather than a sentence: the dialog renders the
+    explanation in the user's language, and the backend is the only thing
+    about it that varies.
+    """
+
+    backend: str
+
+
+@dataclass(frozen=True, slots=True)
+class FallbackNotice:
+    """What a confirmation has to say when another backend runs the action.
+
+    *replaced* names the package manager that could not: the one the user
+    chose, which cannot change what the interpreter imports for these
+    packages. The backend that *will* run it is not carried - the plan's own
+    command is the dialog's answer to "who runs this".
+    """
+
+    replaced: str
+
 
 #: The dialog title for each action.
 _TITLE_KEYS: dict[ActionKind, TranslationKey] = {
@@ -95,12 +124,16 @@ class ConfirmationDialog(QDialog):
         policy: ModificationPolicy,
         translator: Translator,
         project_url: str = "",
+        elevation: ElevationNotice | None = None,
+        fallback: FallbackNotice | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._plan = plan
         self._policy = policy
         self._translator = translator
+        self._elevation = elevation
+        self._fallback = fallback
 
         self.setObjectName("confirmationDialog")
         self.setModal(True)
@@ -159,12 +192,32 @@ class ConfirmationDialog(QDialog):
         layout.addWidget(self.policy_label)
         self._describe_policy()
 
+        self.elevation_label = QLabel(self)
+        self.elevation_label.setObjectName("policyNotice")
+        self.elevation_label.setWordWrap(True)
+        self.elevation_label.setVisible(False)
+        layout.addWidget(self.elevation_label)
+
+        self.fallback_label = QLabel(self)
+        self.fallback_label.setObjectName("policyNotice")
+        self.fallback_label.setWordWrap(True)
+        self.fallback_label.setVisible(False)
+        layout.addWidget(self.fallback_label)
+        self._describe_elevation()
+        self._describe_fallback()
+
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
         )
+        if elevation is not None:
+            confirm_key = TranslationKey.CONFIRM_ELEVATION_BUTTON
+        elif fallback is not None:
+            confirm_key = TranslationKey.CONFIRM_FALLBACK_BUTTON
+        else:
+            confirm_key = action_button_key(plan.action.kind)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            translator.translate(action_button_key(plan.action.kind))
+            translator.translate(confirm_key)
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
             translator.translate(TranslationKey.BUTTON_CANCEL)
@@ -192,6 +245,24 @@ class ConfirmationDialog(QDialog):
     def policy_text(self) -> str:
         return self.policy_label.text()
 
+    @property
+    def elevation_text(self) -> str:
+        return self.elevation_label.text()
+
+    @property
+    def accepts_elevation(self) -> bool:
+        """Whether the action button promises an administrator run."""
+        return self._elevation is not None
+
+    @property
+    def fallback_text(self) -> str:
+        return self.fallback_label.text()
+
+    @property
+    def accepts_fallback(self) -> bool:
+        """Whether the action button names the backend that had to be substituted."""
+        return self._fallback is not None
+
     def accept(self) -> None:
         self.confirmed = True
         super().accept()
@@ -213,6 +284,60 @@ class ConfirmationDialog(QDialog):
 
         self.policy_label.setText(text)
         self.policy_label.setVisible(True)
+
+    def _describe_elevation(self) -> None:
+        """Say, before anything is approved, what the elevated run means.
+
+        SPEC section 11.5 in dialog form: why this one command needs the OS's
+        help, that the help covers this action alone, and that nothing is
+        persisted. The action button reads "Run as administrator" so the
+        approval is for the elevation as well as for the command - an
+        elevated run must never be consented to as a side effect of "Upgrade".
+        """
+        if self._elevation is None:
+            return
+
+        translator = self._translator
+        text = "\n\n".join(
+            (
+                translator.translate(TranslationKey.CONFIRM_ELEVATION_TITLE),
+                translator.translate(
+                    TranslationKey.CONFIRM_ELEVATION_REASON, backend=self._elevation.backend
+                ),
+                translator.translate(TranslationKey.CONFIRM_ELEVATION_NOTE),
+            )
+        )
+
+        self.elevation_label.setText(text)
+        self.elevation_label.setVisible(True)
+
+    def _describe_fallback(self) -> None:
+        """Say that this command is another backend's, and why it had to be.
+
+        The backend the user chose cannot change what the interpreter imports
+        for these packages, so the same action was re-planned through the one
+        backend that can. The substitution is the one thing here that must be
+        consented to explicitly: the dialog shows the other backend's own
+        exact command, and the action button names it (SPEC section 11.7 -
+        the text shown is the data that runs).
+        """
+        if self._fallback is None:
+            return
+
+        translator = self._translator
+        text = "\n\n".join(
+            (
+                translator.translate(TranslationKey.CONFIRM_FALLBACK_TITLE),
+                translator.translate(
+                    TranslationKey.CONFIRM_FALLBACK_REASON,
+                    backend=self._fallback.replaced,
+                    packages=self._plan.action.display_target(),
+                ),
+            )
+        )
+
+        self.fallback_label.setText(text)
+        self.fallback_label.setVisible(True)
 
 
 class BlockedDialog(QDialog):
@@ -306,6 +431,125 @@ class BlockedDialog(QDialog):
     @property
     def suggestion_text(self) -> str:
         return self.suggestion_label.text()
+
+
+class RollbackPreviewDialog(QDialog):
+    """The preview of a restore, before the restore runs.
+
+    SPEC section 4: "rollback with preview diff". This is deliberately *not*
+    a confirmation dialog repeated twice - it is the one confirmation the
+    restore gets, and it shows every exact command the restore will run, in
+    order, so what is approved is what runs (SPEC section 11.7). Restoring is
+    a bulk action that can uninstall things, so the preview states the
+    removals as loudly as the reinstalls.
+    """
+
+    def __init__(
+        self,
+        *,
+        restore_specs: tuple[str, ...],
+        remove_names: tuple[str, ...],
+        commands: tuple[str, ...],
+        elevated: bool,
+        translator: Translator,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._translator = translator
+        self.setModal(True)
+        self.setMinimumWidth(640)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(translator.translate(TranslationKey.RESTORE_TITLE), self)
+        title.setObjectName("pageTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        if restore_specs:
+            restore_heading = QLabel(
+                translator.translate(TranslationKey.RESTORE_REINTRODUCE, count=len(restore_specs)),
+                self,
+            )
+            restore_heading.setObjectName("sectionHeading")
+            restore_heading.setWordWrap(True)
+            layout.addWidget(restore_heading)
+
+            restore_view = QPlainTextEdit(self)
+            restore_view.setObjectName("removalList")
+            restore_view.setReadOnly(True)
+            restore_view.setPlainText("\n".join(restore_specs))
+            restore_view.setFixedHeight(min(160, 24 * max(1, len(restore_specs))))
+            layout.addWidget(restore_view)
+
+        if remove_names:
+            remove_heading = QLabel(
+                translator.translate(TranslationKey.RESTORE_REMOVE, count=len(remove_names)),
+                self,
+            )
+            remove_heading.setObjectName("errorText")
+            remove_heading.setWordWrap(True)
+            layout.addWidget(remove_heading)
+
+            remove_view = QPlainTextEdit(self)
+            remove_view.setObjectName("removalList")
+            remove_view.setReadOnly(True)
+            remove_view.setPlainText("\n".join(remove_names))
+            remove_view.setFixedHeight(min(120, 24 * max(1, len(remove_names))))
+            layout.addWidget(remove_view)
+
+        if elevated:
+            elevation_note = QLabel(
+                "\n\n".join(
+                    (
+                        translator.translate(TranslationKey.CONFIRM_ELEVATION_TITLE),
+                        translator.translate(TranslationKey.CONFIRM_ELEVATION_NOTE),
+                    )
+                ),
+                self,
+            )
+            elevation_note.setObjectName("policyNotice")
+            elevation_note.setWordWrap(True)
+            layout.addWidget(elevation_note)
+
+        if commands:
+            commands_heading = QLabel(translator.translate(TranslationKey.CONFIRM_COMMAND), self)
+            commands_heading.setObjectName("mutedText")
+            layout.addWidget(commands_heading)
+
+            commands_view = QPlainTextEdit(self)
+            commands_view.setObjectName("commandPreview")
+            commands_view.setReadOnly(True)
+            commands_view.setPlainText("\n".join(commands))
+            commands_view.setFixedHeight(72 * max(1, len(commands)))
+            layout.addWidget(commands_view)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            translator.translate(
+                TranslationKey.CONFIRM_ELEVATION_BUTTON
+                if elevated
+                else TranslationKey.SNAPSHOTS_RESTORE
+            )
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primaryButton")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            translator.translate(TranslationKey.BUTTON_CANCEL)
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        #: True once the user pressed the restore button.
+        self.confirmed = False
+
+    def accept(self) -> None:
+        self.confirmed = True
+        super().accept()
 
 
 class RemovalPreviewDialog(QDialog):

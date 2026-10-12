@@ -15,15 +15,19 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel
 
 from pypackhub.core.settings import AppSettings, ColorTheme, Language
 from pypackhub.core.validation import ValidationError
 from pypackhub.ui.i18n.translations import EN_TABLE, FA_TABLE, TranslationKey
-from pypackhub.ui.views.settings import SettingsView
+from pypackhub.ui.services import UiContext
+from pypackhub.ui.views.settings import PACKAGE_MANAGER_CHOICES, SettingsView
 from pypackhub.ui.views.window_shell import QSettingsStore, WindowShell
 
 pytestmark = pytest.mark.gui
+
+#: A prefix that never has to exist: no test in this file touches an environment.
+PREFIX = Path("/fake/env").resolve()
 
 
 @pytest.fixture
@@ -174,3 +178,135 @@ def test_the_combo_entries_are_offered_in_every_variant(view: SettingsView) -> N
         assert view._theme_combo.itemData(index) == list(ColorTheme)[index].value
     for index in range(len(Language)):
         assert view._language_combo.itemData(index) == list(Language)[index].value
+
+
+# -- the package-manager row --------------------------------------------------
+#
+# The row used to be a bare combo with no hint under it and no height of its own:
+# a styled ``QComboBox`` takes its height from the style sheet, and with no
+# ``min-height`` it renders as a thin bar that cannot be aimed at. These tests
+# measure the control as the user sees it - with the application's stylesheet
+# applied - rather than trusting a hard-coded ``setMinimumHeight``.
+
+
+def test_the_package_manager_control_is_a_usable_field(
+    qapp: QApplication, view: SettingsView, shell: WindowShell
+) -> None:
+    shell.apply_to(qapp)
+    view.resize(1100, 700)
+    view.show()
+
+    combo = view._package_manager
+    assert combo.height() >= 26
+    assert combo.width() >= 220
+
+
+def test_the_package_manager_row_explains_itself_and_follows_the_language(
+    qapp: QApplication, view: SettingsView, shell: WindowShell
+) -> None:
+    del qapp
+    hint = view._labels[TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT]
+    assert hint.text() == EN_TABLE[TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT]
+    assert not hint.isHidden()
+    assert hint.wordWrap()
+
+    shell.set_language(Language.FA)
+    view.retranslate()
+    assert hint.text() == FA_TABLE[TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT]
+
+
+def test_the_package_manager_entries_say_what_they_mean(
+    qapp: QApplication, view: SettingsView, shell: WindowShell
+) -> None:
+    """ "auto" alone says nothing; the entry now names the order it tries."""
+    del qapp
+    combo = view._package_manager
+    choices = [combo.itemData(index) for index in range(combo.count())]
+
+    assert choices == ["auto", "pip", "uv"]
+    assert combo.itemText(0) == EN_TABLE[TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO]
+    assert combo.itemText(1) == "pip"
+    assert combo.itemText(2) == "uv"
+
+    shell.set_language(Language.FA)
+    view.retranslate()
+    assert combo.itemText(0) == FA_TABLE[TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO]
+
+
+def test_the_page_scrolls_when_it_is_taller_than_the_window(
+    qapp: QApplication, view: SettingsView
+) -> None:
+    """A setting that falls off the bottom edge with no scrollbar is unreachable."""
+    del qapp
+    view.resize(900, 420)
+    view.show()
+
+    assert view._scroll.widget() is view._body
+    assert view._body.height() > view._scroll.viewport().height()
+    assert view._scroll.verticalScrollBar().maximum() > 0
+    # Every control is inside the scrolled body, so scrolling reaches all of them.
+    assert isinstance(view._package_manager, QComboBox)
+    assert view._scroll.isAncestorOf(view._package_manager)
+
+
+# -- the package-manager change reaching the application ----------------------
+#
+# The combo used to call ``shell.context.set_package_manager`` - an attribute no
+# shell has ever had, guarded by ``hasattr``, so the call never ran. A manager
+# picked on the page therefore changed nothing until the next launch. The page
+# is now handed the window's real context, and these tests hold that wiring in
+# place: a control that stores a preference without applying it is a control
+# that lies.
+
+
+class RecordingProvider:
+    """The provider as the settings page sees it: it records, it does not build.
+
+    ``create`` returns a fresh object per call, which is what makes the service
+    cache observable: a service that survives a package-manager change is a
+    service still bound to the previous choice.
+    """
+
+    def __init__(self) -> None:
+        self.choices: list[str] = []
+
+    def set_package_manager(self, package_manager: str) -> None:
+        self.choices.append(package_manager)
+
+    def create(self, prefix: Path) -> object:
+        del prefix
+        return object()
+
+    def environments(self) -> tuple[Path, ...]:
+        return ()
+
+
+def test_picking_a_manager_reaches_the_services_the_views_share(
+    qapp: QApplication, shell: WindowShell
+) -> None:
+    del qapp
+    provider = RecordingProvider()
+    context = UiContext(provider=provider, default_environment=PREFIX)
+    stale = context.service_for(PREFIX)
+    page = SettingsView(shell=shell, context=context)
+    page.load_settings(shell.settings)
+
+    page._package_manager.setCurrentIndex(PACKAGE_MANAGER_CHOICES.index("pip"))
+
+    assert context.package_manager == "pip"
+    assert provider.choices == ["pip"]
+    # The provider was told about the change rather than replaced (a test's fake
+    # must survive it, and so must the real provider's own configuration), and
+    # the services built for the previous choice did not outlive it.
+    assert context.provider is provider
+    assert context.service_for(PREFIX) is not stale
+
+
+def test_a_page_with_no_context_still_persists_the_choice(
+    view: SettingsView, shell: WindowShell, store: QSettingsStore
+) -> None:
+    """A context-less page keeps its settings; it only cannot rewire services."""
+    view._package_manager.setCurrentIndex(PACKAGE_MANAGER_CHOICES.index("uv"))
+
+    assert shell.settings.package_manager == "uv"
+    assert store.load()["package_manager"] == "uv"

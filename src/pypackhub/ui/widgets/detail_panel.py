@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -138,7 +137,7 @@ class DetailPanel(QWidget):
         body.addWidget(self.links_container)
         body.addStretch(1)
 
-        self._link_buttons: list[QToolButton] = []
+        self._link_buttons: list[QPushButton] = []
         self.edit_label = QLabel(self._scroll_body)
         self.target_label = QLabel(self._scroll_body)
         self.python_label = QLabel(self._scroll_body)
@@ -226,9 +225,7 @@ class DetailPanel(QWidget):
         self.summary_label.setVisible(bool(summary))
         self._render_notice(row)
         self._render_fields(row)
-        self.requires_label.setText(
-            self._list_text(metadata.requires if metadata else ())
-        )
+        self.requires_label.setText(self._list_text(metadata.requires if metadata else ()))
         self.required_by_label.setText(self._list_text(self._dependents))
         self._render_links(row)
 
@@ -338,4 +335,3 @@ class DetailPanel(QWidget):
             self.show_row(self._row, metadata=self._metadata, dependents=self._dependents)
         else:
             self.clear()
-

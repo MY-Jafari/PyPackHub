@@ -129,6 +129,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
 .venv
 env/
 venv/
@@ -179,9 +180,6 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore.cursorindexingignore
 
-# Freebuff agent-tooling state (local to a checkout, not part of the project)
-.freebuff/
-
 # Throwaway environment used to check that the core really runs without Qt
 .testenv/
 
@@ -202,6 +200,8 @@ desktop.ini
 *.swo
 *.orig
 *.rej
+*.bak
+*.tmp
 .idea/
 .vscode/
 
@@ -216,6 +216,20 @@ desktop.ini
 .claude/
 .windsurf/
 .agent/
+.agents/
+.opencode/
+.gemini/
+.qwen/
+.trae/
+.goose/
+.smol/
+# Agent instruction files are a project decision, not agent state: AGENTS.md
+# and friends are committed deliberately when the project wants them.
+
+# ---------------------------------------------------------------------------
+# Scratch space: one-off scripts and probes from a working session
+# ---------------------------------------------------------------------------
+tmp/
 
 # ---------------------------------------------------------------------------
 # Runtime data and databases (cache, logs, snapshots) must never be committed
