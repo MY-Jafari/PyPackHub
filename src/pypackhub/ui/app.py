@@ -98,11 +98,15 @@ def build_window(
 
     package_manager = shell.settings.package_manager
 
-    # ``shell=`` is PyPackHub's own window-shell object, not a command shell; this
-    # is a bandit false positive on the keyword's name (B604, low confidence).
+    # ``shell=`` is PyPackHub's own window-shell object, not a command shell;
+    # the ``# nosec`` below is a false positive on the keyword's name (B604,
+    # low confidence), the same one every view constructor in
+    # main_window.py carries one for. It belongs on this exact line: bandit
+    # reports the finding on the ``shell=`` keyword, and a nosec elsewhere in
+    # the call suppresses nothing (and draws a warning of its own).
     window = MainWindow(
-        shell=shell,
-        context=context or build_context(package_manager=package_manager),  # nosec B604
+        shell=shell,  # nosec B604
+        context=context or build_context(package_manager=package_manager),
     )
     window.apply_theme()
     return window

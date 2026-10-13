@@ -381,7 +381,7 @@ class MainWindow(QMainWindow):
 
         self._environments_view = EnvironmentsView(
             context=self._context,
-            shell=self._shell,
+            shell=self._shell,  # nosec B604
             parent=self,
         )
         self.register_view(ViewName.ENVIRONMENTS, self._environments_view)

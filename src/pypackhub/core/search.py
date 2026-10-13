@@ -218,10 +218,12 @@ class SearchService:
                 for future in done:
                     pending.discard(future)
                     # Defensive only: ``lookup`` already degrades its own
-                    # failures, so an exception here is the pool's, not a row's.
+                    # failures, so an exception here is the pool's, not a
+                    # row's. ruff's S112 and bandit's B112 are the same
+                    # finding under two scanners; both are suppressed here.
                     try:
                         result = future.result()
-                    except Exception:  # noqa: S112
+                    except Exception:  # noqa: S112  # nosec B112
                         continue
                     outcomes[result.name] = result
                     if on_result is not None:
