@@ -490,6 +490,9 @@ def test_an_elevation_needing_action_is_confirmed_then_run_elevated(
 ) -> None:
     """The confirmation carries the explanation, the run carries the privileges."""
     service.needs_elevation = True
+    # The OS's elevation mechanism is the environment's business, not this
+    # test's: the question here is what the *view* does when one is available.
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: True)
     recorded: dict[str, object] = {}
 
     class AcceptingConfirmation:

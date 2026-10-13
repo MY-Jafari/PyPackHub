@@ -70,13 +70,15 @@ jobs:
       - name: pytest
         run: python -m pytest --cov=pypackhub --cov-report=term-missing
 
-  # The spec asks for a Windows/macOS/Linux matrix. Running it on every push
-  # would multiply CI cost (Windows runners are billed at 2x and macOS at 10x),
-  # so the desktop legs run on pull requests, tags and manual dispatches, while
-  # every push still gets the full Linux matrix. See docs/DECISIONS.md.
+  # The spec asks for a Windows/macOS/Linux matrix. Running the desktop legs
+  # on every feature-branch push would multiply CI cost (Windows runners are
+  # billed at 2x and macOS at 10x), so the compromise is: every push to main
+  # and every pull request get all three operating systems - main is what
+  # people clone - while a feature-branch push still gets the full Linux
+  # matrix. See docs/DECISIONS.md.
   test-desktop:
     name: Tests (${{ matrix.os }}, py${{ matrix.python }})
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

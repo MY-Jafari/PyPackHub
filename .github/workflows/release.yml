@@ -1,15 +1,31 @@
 name: Release
 
-# Builds the stand-alone installers for Windows, macOS and Linux and publishes
-# them, with checksums, on a GitHub Release for the tag.
+# Verifies the application on all three operating systems, then builds the
+# stand-alone binaries, then publishes them - with checksums - on a GitHub
+# Release.
 #
-# Every tag matching v*.*.* releases. The workflow can also be dispatched by
-# hand, in which case `tag` picks the release name (blank: v<pyproject version>).
-# In both cases the tag has to agree with pyproject.toml, because the same number
-# is baked into the executable's version resource and shown in the About box - a
-# release that disagrees with itself is worse than no release.
+# Two ways in:
 #
-# The four jobs are deliberately chained rather than parallel: a broken tree
+# * Push a tag matching v*.*.* by hand, or
+# * dispatch by hand, in which case `tag` picks the release name (blank:
+#   v + the version in pyproject.toml). When the resolved tag does not exist
+#   yet it is created automatically - that is the "cut a release" button:
+#   bump the version in pyproject.toml, dispatch, and the tag, the binaries
+#   and the release all follow, provided the verification below passes.
+#
+# In both cases the tag has to agree with pyproject.toml, because the same
+# number is baked into the executable's version resource and shown in the
+# About box - a release that disagrees with itself is worse than no release.
+#
+# Nothing is published unless the application was first run on every target
+# operating system: the verify matrix runs the full test-suite on Windows,
+# macOS and Linux, and each build leg launches the real binary it produced
+# (packaging/smoke_test.py, or a timeout-based launch for the packages that
+# install into a clean system) before any artifact is uploaded. The macOS
+# leg in particular is a hard gate: there is no way to publish a release
+# whose application has not started on a macOS runner.
+#
+# The jobs are deliberately chained rather than parallel: a broken tree
 # should never reach a published asset.
 
 on:
@@ -24,9 +40,9 @@ on:
         default: ""
         type: string
 
-# The workflow itself only needs read access; the job that publishes is granted
-# `contents: write` on its own, which is as little privilege as this can work
-# with.
+# The workflow itself only needs read access; the jobs that create a tag and
+# publish are granted `contents: write` on their own, which is as little
+# privilege as each can work with.
 permissions:
   contents: read
 
@@ -36,13 +52,29 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  # No display server on a runner, and the smoke test runs the built app with
-  # the same platform plugin.
+  # No display server on a runner, and every smoke test below launches the
+  # built application with the same platform plugin.
   QT_QPA_PLATFORM: offscreen
+  # The Linux bundle is built inside this container rather than directly on
+  # the runner: the runner's glibc is newer than most desktops', and a binary
+  # built there only starts on systems as new as the runner itself. Building
+  # on Debian bookworm sets the floor at glibc 2.36 - Debian 12, Ubuntu 24.04
+  # and every current rolling release - which was verified the hard way: a
+  # trixie-built bundle refuses to start on Debian 12 with "GLIBC_2.38 not
+  # found".
+  LINUX_BUILD_IMAGE: "python:3.13-slim-bookworm"
+  # PyInstaller's binary analysis needs objdump at build time, and the Qt
+  # runtime libraries are what the .deb and the Arch package declare as their
+  # dependencies; the build container must have them for its own smoke test,
+  # and the same list is what packaging/linux/build_deb.sh writes into the
+  # package.
+  LINUX_BUILD_PACKAGES: >-
+    binutils libgl1 libegl1 libxcb-cursor0 libxkbcommon0 libfontconfig1
+    libglib2.0-0 libdbus-1-3 libgssapi-krb5-2
 
 jobs:
   verify:
-    name: Lint, type-check and test
+    name: Verify (ubuntu)
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -77,9 +109,39 @@ jobs:
       - name: pytest
         run: python -m pytest -q
 
+  verify-desktop:
+    # The tests have to pass on the operating systems people actually run the
+    # application on, not just on the one that builds the sdist. Windows and
+    # macOS legs exist precisely because pathlib, Qt and the platform guard
+    # all behave differently there - three real defects in this repository's
+    # history were only ever caught by these legs.
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the project and the dev tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: pytest
+        run: python -m pytest -q
+
   version:
     name: Resolve the version
-    needs: verify
+    needs: [verify, verify-desktop]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -128,9 +190,51 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "Releasing PyPackHub ${version} as ${tag}"
 
+  tag:
+    # The "create the tag automatically" half. On a dispatch, a tag that
+    # does not exist yet is created at the commit that was verified - after
+    # the whole verification matrix has passed, never before. On a tag push
+    # the tag already exists and this is a no-op.
+    name: Create the tag (when it does not exist)
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Does the tag exist?
+        id: exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}"; then
+            echo "Tag ${TAG} already exists; the release publishes to it."
+            echo "created=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Tag ${TAG} does not exist; it will be created at ${GITHUB_SHA}."
+            echo "created=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Create and push the tag
+        if: steps.exists.outputs.created == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "PyPackHub release workflow"
+          git config user.email "actions@users.noreply.github.com"
+          git tag -a "${TAG}" -m "PyPackHub ${TAG#v}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG}"
+          echo "Created and pushed ${TAG} at ${GITHUB_SHA}."
+
   build:
     name: Build ${{ matrix.name }}
-    needs: version
+    needs: [version, tag]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -154,21 +258,160 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
 
+      # ------------------------------------------------------------------
+      # Linux: the bundle, the tarball, the .deb and the Arch package are
+      # all built inside containers, and every one of them is launched
+      # before it is uploaded.
+      # ------------------------------------------------------------------
+      - name: Build the bundle and the .deb (Debian bookworm container)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "${GITHUB_WORKSPACE}"
+          mkdir -p dist/linux-bundle dist/linux-release
+
+          # docker run does not inherit this step's environment: every
+          # variable the container script needs is passed explicitly.
+          docker run --rm \
+            -e QT_QPA_PLATFORM=offscreen \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e PYPACKHUB_VERSION="${VERSION}" \
+            -e LINUX_BUILD_PACKAGES="${LINUX_BUILD_PACKAGES}" \
+            -v "${GITHUB_WORKSPACE}:/src" \
+            -v "${GITHUB_WORKSPACE}/dist/linux-bundle:/out-bundle" \
+            -v "${GITHUB_WORKSPACE}/dist/linux-release:/out-release" \
+            "${LINUX_BUILD_IMAGE}" bash -eux - <<'CONTAINER'
+          set -eu
+          mkdir /work
+          tar -C /src \
+            --exclude=./dist --exclude=./build --exclude=./.git \
+            --exclude=__pycache__ --exclude=.mypy_cache \
+            --exclude=.pytest_cache --exclude=.ruff_cache \
+            -cf - . | tar -C /work -xf -
+          cd /work
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ${LINUX_BUILD_PACKAGES}
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -e ".[packaging]"
+          python packaging/make_icons.py
+          python -m PyInstaller packaging/pypackhub.spec --noconfirm \
+            --distpath dist --workpath build/pyinstaller
+
+          # Launch what was built before anything is packaged from it.
+          python packaging/smoke_test.py --dist dist --grace 15
+
+          # The tarball with install.sh, exactly as the README documents it.
+          cp packaging/linux/install.sh dist/install.sh
+          cp packaging/icon.png dist/icon.png
+          chmod +x dist/install.sh
+          tar -czf "/out-release/PyPackHub-${PYPACKHUB_VERSION}-linux-x86_64.tar.gz" \
+            -C dist PyPackHub install.sh icon.png
+
+          # The Debian package, built from the same bundle by the script in
+          # the repository (plain dpkg-deb; the container is Debian).
+          sh packaging/linux/build_deb.sh \
+            --bundle dist/PyPackHub \
+            --version "${PYPACKHUB_VERSION}" \
+            --output /out-release
+
+          # The bundle travels to the Arch container, which packages the
+          # same binaries for a different distribution.
+          cp -a dist/PyPackHub /out-bundle/
+          CONTAINER
+
+          ls -la dist/linux-release
+
+      - name: Build and verify the Arch package (archlinux container)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e QT_QPA_PLATFORM=offscreen \
+            -e PYPACKHUB_VERSION="${VERSION}" \
+            -v "${GITHUB_WORKSPACE}:/src" \
+            -v "${GITHUB_WORKSPACE}/dist/linux-bundle:/bundle" \
+            -v "${GITHUB_WORKSPACE}/dist/linux-release:/out-release" \
+            archlinux:base-devel bash -eux - <<'CONTAINER'
+          set -eu
+          # One database sync, then one install: makepkg checks that the
+          # runtime dependencies are present, but runs as an unprivileged
+          # user and cannot install anything itself.
+          pacman -Sy --noconfirm >/dev/null
+          pacman -S --needed --noconfirm \
+            libglvnd xcb-util-cursor libxkbcommon fontconfig glib2 dbus krb5 \
+            >/dev/null
+
+          useradd -m builder
+          mkdir -p /work && chown builder:builder /work
+          cd /work
+
+          # The PKGBUILD expects the release bundle as its source.
+          tar -czf "pypackhub-${PYPACKHUB_VERSION}-bundle.tar.gz" -C /bundle PyPackHub
+          sed "s/VERSION_PLACEHOLDER/${PYPACKHUB_VERSION}/" \
+            /src/packaging/linux/PKGBUILD > PKGBUILD
+
+          runuser -u builder -- makepkg -f --noprepare --noconfirm
+
+          package_file="pypackhub-${PYPACKHUB_VERSION}-1-x86_64.pkg.tar.zst"
+          test -f "${package_file}"
+          echo "Built ${package_file}"
+
+          # Install what was built into this clean system, and launch it:
+          # timeout's exit code 124 means the application was still alive
+          # when the grace period ended - the pass condition.
+          pacman -U --noconfirm "${package_file}" >/dev/null
+          test -x /usr/bin/pypackhub
+          code=0
+          QT_QPA_PLATFORM=offscreen timeout 15 /usr/bin/pypackhub || code=$?
+          if [ "${code}" -ne 124 ]; then
+            echo "::error::The Arch-installed application exited early (code ${code})."
+            exit 1
+          fi
+          echo "The pacman-installed application stayed alive for the grace period."
+
+          cp "${package_file}" /out-release/
+          CONTAINER
+
+          ls -la dist/linux-release
+
+      - name: Collect the Linux artifacts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp dist/linux-release/* release/
+          ls -la release
+
+      # ------------------------------------------------------------------
+      # Windows: the zip, and the setup.exe through Inno Setup.
+      # ------------------------------------------------------------------
       - name: Set up Python
+        if: runner.os != 'Linux'
         uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Install the project and the bundler
+        if: runner.os != 'Linux'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[packaging]"
 
       - name: Render the application icons
+        if: runner.os != 'Linux'
         run: python packaging/make_icons.py
 
       - name: Build the stand-alone bundle
+        if: runner.os != 'Linux'
         env:
           PYPACKHUB_VERSION: ${{ needs.version.outputs.version }}
           PYPACKHUB_TARGET_ARCH: ${{ matrix.target_arch }}
@@ -179,6 +422,7 @@ jobs:
       # executable and insists it stays up - which is what catches a missing
       # Qt module or an over-eager exclusion in the spec.
       - name: Smoke test the built bundle
+        if: runner.os != 'Linux'
         run: python packaging/smoke_test.py --dist dist --grace 15
 
       - name: Read back the architectures that were actually built
@@ -193,21 +437,6 @@ jobs:
           if [ "${archs}" != "arm64-x86_64" ]; then
             echo "::notice title=macOS bundle is not universal2::PyInstaller produced '${archs}'. The artifact is named after what was built, not what was requested."
           fi
-
-      - name: Package the Linux bundle
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          # The installer script and the desktop icon travel inside the archive,
-          # so the tarball is self-sufficient: unpack, run ./install.sh, done.
-          cp packaging/linux/install.sh dist/install.sh
-          cp packaging/icon.png dist/icon.png
-          chmod +x dist/install.sh
-          tar -czf "release/PyPackHub-${VERSION}-linux-x86_64.tar.gz" -C dist PyPackHub install.sh icon.png
 
       - name: Package the Windows bundle
         if: runner.os == 'Windows'
@@ -276,6 +505,22 @@ jobs:
             dist/PyPackHub.app \
             "release/PyPackHub-${VERSION}-macos-${MACOS_ARCHS}.zip"
 
+      - name: Build the macOS disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # hdiutil ships with macOS; UDZO is the compressed read-only format
+          # every Mac mounts by double-clicking. The zip stays alongside it
+          # for people who want the .app without the disk image.
+          hdiutil create -volname "PyPackHub" \
+            -srcfolder dist/PyPackHub.app \
+            -ov -format UDZO \
+            "release/PyPackHub-${VERSION}-macos-${MACOS_ARCHS}.dmg"
+          hdiutil verify "release/PyPackHub-${VERSION}-macos-${MACOS_ARCHS}.dmg"
+
       - name: List what was produced
         shell: bash
         run: |
@@ -327,9 +572,13 @@ jobs:
           echo "Checksums:"
           cat SHA256SUMS.txt
           # Every expected platform has to be here. An artifact that silently
-          # failed to upload is the one people notice a week later.
+          # failed to upload is the one people notice a week later - the
+          # exact set the Linux, Windows and macOS legs above were verified
+          # to produce.
           for required in \
             "PyPackHub-${VERSION}-linux-x86_64.tar.gz" \
+            "pypackhub_${VERSION}_amd64.deb" \
+            "pypackhub-${VERSION}-1-x86_64.pkg.tar.zst" \
             "PyPackHub-${VERSION}-windows-x86_64.zip" \
             "pypackhub-${VERSION}-py3-none-any.whl"; do
             if ! grep -q " ${required}$" SHA256SUMS.txt; then
@@ -339,6 +588,10 @@ jobs:
           done
           if ! grep -qE "PyPackHub-${VERSION}-macos-.+\.zip" SHA256SUMS.txt; then
             echo "::error::the macOS bundle is missing from the release assets."
+            exit 1
+          fi
+          if ! grep -qE "PyPackHub-${VERSION}-macos-.+\.dmg" SHA256SUMS.txt; then
+            echo "::error::the macOS disk image is missing from the release assets."
             exit 1
           fi
         env:

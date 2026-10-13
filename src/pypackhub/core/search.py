@@ -217,11 +217,11 @@ class SearchService:
                 done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
                 for future in done:
                     pending.discard(future)
+                    # Defensive only: ``lookup`` already degrades its own
+                    # failures, so an exception here is the pool's, not a row's.
                     try:
                         result = future.result()
-                    except (
-                        Exception
-                    ):  # noqa: S112 - defensive; ``lookup`` degrades its own failures
+                    except Exception:  # noqa: S112
                         continue
                     outcomes[result.name] = result
                     if on_result is not None:

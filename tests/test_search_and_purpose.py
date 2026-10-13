@@ -81,7 +81,9 @@ def test_search_resolves_the_ranked_names_in_order() -> None:
 
     results = service.search("flask")
 
-    assert index.asked[:2] == ["flask", "flask-login"]
+    # Lookups run several at a time, so the order they are *asked* in is a
+    # thread race; the order they are *answered* in is the service's contract.
+    assert set(index.asked) >= {"flask", "flask-login"}
     assert [result.name for result in results[:2]] == ["flask", "flask-login"]
     assert results[0].latest_version == "3.1.3"
     assert results[0].summary == "micro web framework"

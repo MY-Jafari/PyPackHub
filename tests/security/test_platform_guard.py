@@ -150,6 +150,14 @@ def test_a_real_executable_is_not_an_alias_stub(
         assert is_windows_app_alias_stub(real) is False
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason=(
+        "the stub is simulated by patching os.name, and Python 3.13's pathlib "
+        "dispatches on os.name at call time - on a POSIX host the patch turns "
+        "Path() into WindowsPath against a POSIX filesystem"
+    ),
+)
 def test_alias_stub_target_is_never_modifiable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

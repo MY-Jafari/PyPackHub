@@ -1,0 +1,73 @@
+# Maintainer: PyPackHub contributors <https://github.com/MY-Jafari/PyPackHub>
+# Upstream binary package: it repackages the release bundle PyInstaller built
+# on the project's own CI, exactly like the .deb does. The bundle tarball is
+# placed next to this file by the build (see packaging/linux/README or the
+# release workflow); building it by hand works the same way:
+#
+#   tar -czf pypackhub-${pkgver}-bundle.tar.gz -C dist PyPackHub
+#   cp packaging/linux/PKGBUILD ./
+#   makepkg -f
+#
+pkgname=pypackhub
+pkgver=VERSION_PLACEHOLDER
+pkgrel=1
+pkgdesc='One visual interface for every Python environment'
+arch=('x86_64')
+url='https://github.com/MY-Jafari/PyPackHub'
+license=('GPL-3.0-only')
+# The Qt runtime libraries a bundle cannot ship itself - the same set the .deb
+# declares, verified the same way (install into a clean system, launch), under
+# the names Arch gives them.
+depends=(
+  'libglvnd'
+  'xcb-util-cursor'
+  'libxkbcommon'
+  'fontconfig'
+  'glib2'
+  'dbus'
+  'krb5'
+)
+makedepends=()
+source=("pypackhub-${pkgver}-bundle.tar.gz")
+# The bundle is produced by the same pipeline that runs this PKGBUILD, and its
+# checksum is published for the release as a whole in SHA256SUMS.txt - the
+# tarball next to this file is the input, not something downloaded from
+# anywhere, so the checksum here would only compare the file with itself.
+sha256sums=('SKIP')
+options=('!strip')
+
+package() {
+  install -d "${pkgdir}/opt/pypackhub" \
+             "${pkgdir}/usr/bin" \
+             "${pkgdir}/usr/share/applications" \
+             "${pkgdir}/usr/share/icons/hicolor/scalable/apps"
+
+  # The bundle goes in whole, with the executable bit PyInstaller set.
+  cp -a "PyPackHub" "${pkgdir}/opt/pypackhub/PyPackHub"
+  chmod 0755 "${pkgdir}/opt/pypackhub/PyPackHub/PyPackHub"
+
+  ln -sf /opt/pypackhub/PyPackHub/PyPackHub "${pkgdir}/usr/bin/pypackhub"
+
+  # The desktop entry matches the one install.sh and the .deb write, so the
+  # menu behaves the same however the application arrived.
+  install -m 0644 /dev/stdin \
+    "${pkgdir}/usr/share/applications/pypackhub.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PyPackHub
+GenericName=Python package manager
+Comment=View and manage Python packages and environments
+Exec=/opt/pypackhub/PyPackHub/PyPackHub
+Icon=pypackhub
+Terminal=false
+Categories=Development;Utility;
+Keywords=python;pip;uv;packages;venv;virtualenv;
+StartupNotify=true
+DESKTOP
+
+  # The icon ships inside the bundle (rendered from the same SVG), so the
+  # package needs no second source entry to carry it.
+  install -m 0644 "PyPackHub/_internal/pypackhub/assets/icons/app.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/pypackhub.svg"
+}
