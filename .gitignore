@@ -30,7 +30,14 @@ MANIFEST
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+#  A bare `pyinstaller app.py` run also drops a *generated* spec next to the
+#  entry script - ignore only those, anchored to the repository root.
+#  packaging/pypackhub.spec is the opposite: a hand-written build recipe the
+#  release workflow feeds to PyInstaller on every platform, and it must stay
+#  tracked. (It spent a release cycle silently untracked while this rule
+#  read `*.spec`, which is how all three build legs failed with
+#  "Spec file not found".)
+/*.spec
 
 # Installer logs
 pip-log.txt
