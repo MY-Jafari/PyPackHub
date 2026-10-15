@@ -287,9 +287,15 @@ jobs:
           echo "${GITHUB_WORKSPACE}"
           mkdir -p dist/linux-bundle dist/linux-release
 
-          # docker run does not inherit this step's environment: every
-          # variable the container script needs is passed explicitly.
-          docker run --rm \
+          # ``-i`` is load-bearing: the script reaches bash's stdin through
+          # the heredoc below, and a ``docker run`` without it never
+          # forwards stdin - bash reads instant EOF, executes nothing, and
+          # exits 0, so the step "succeeds" while producing no artifacts
+          # (first seen in release run #1, where the only visible failure
+          # was the later ``cp`` over an empty directory).
+          # docker run does not inherit this step's environment either:
+          # every variable the container script needs is passed explicitly.
+          docker run --rm -i \
             -e QT_QPA_PLATFORM=offscreen \
             -e PYTHONDONTWRITEBYTECODE=1 \
             -e PYPACKHUB_VERSION="${VERSION}" \
@@ -337,6 +343,12 @@ jobs:
           cp -a dist/PyPackHub /out-bundle/
           CONTAINER
 
+          # The artifacts must really exist before anything else runs: a
+          # container that silently did nothing (see the ``-i`` note above)
+          # would otherwise only be caught by the collect step, three steps
+          # away from its cause.
+          test -f "dist/linux-release/PyPackHub-${VERSION}-linux-x86_64.tar.gz"
+          test -f "dist/linux-release/pypackhub_${VERSION}_amd64.deb"
           ls -la dist/linux-release
 
       - name: Build and verify the Arch package (archlinux container)
@@ -346,7 +358,7 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          docker run --rm \
+          docker run --rm -i \
             -e QT_QPA_PLATFORM=offscreen \
             -e PYPACKHUB_VERSION="${VERSION}" \
             -v "${GITHUB_WORKSPACE}:/src" \
@@ -393,6 +405,7 @@ jobs:
           cp "${package_file}" /out-release/
           CONTAINER
 
+          test -f "dist/linux-release/pypackhub-${VERSION}-1-x86_64.pkg.tar.zst"
           ls -la dist/linux-release
 
       - name: Collect the Linux artifacts
