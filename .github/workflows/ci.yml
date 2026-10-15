@@ -62,6 +62,20 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
+      # PySide6's QtGui links the system GL, glib and keyboard-layout
+      # libraries even under the offscreen platform plugin, and a stock
+      # GitHub runner has none of them: the import itself dies with
+      # "libEGL.so.1: cannot open shared object file" (then glib next). The
+      # list below was verified on a bare ubuntu-24.04 image - the runner's
+      # base, minus everything the image preinstalls - by importing QtGui
+      # and instantiating an offscreen QApplication with nothing else
+      # installed.
+      - name: Install the headless Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
+
       - name: Install the project and the dev tools
         run: |
           python -m pip install --upgrade pip

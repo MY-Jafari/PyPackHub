@@ -602,7 +602,7 @@ def elevation_supported() -> bool:
     """
     if os.name == "nt":
         return True
-    if sys.platform == "darwin":  # pragma: no cover - no macOS CI runner
+    if sys.platform == "darwin":
         return False
     return shutil.which("pkexec") is not None
 
@@ -782,7 +782,7 @@ def _run_elevated_posix(
     applies unchanged, output is captured for the result, and cancellation
     works exactly like any other command's.
     """
-    if sys.platform == "darwin":  # pragma: no cover - no macOS CI runner
+    if sys.platform == "darwin":
         return CommandResult(
             argv=command,
             returncode=-1,

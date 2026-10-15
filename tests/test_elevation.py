@@ -14,6 +14,7 @@ handling and refusal paths.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -304,6 +305,40 @@ def test_windows_offers_elevation() -> None:
     assert elevation_supported()
 
 
+def test_macos_refuses_rather_than_falling_back_to_a_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third operating system is a refusal, not a shell.
+
+    macOS's own route would be embedding the command inside an AppleScript
+    string - exactly the string-command execution the security rules forbid -
+    so the runner declines, says what to do instead, and never starts a
+    process. The platform is pinned rather than skipped so that every leg
+    of the CI matrix covers this branch, macOS runners included.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # ``elevation_supported`` dispatches on ``os.name`` first (UAC before the
+    # darwin refusal), so a Windows host would never reach the branch under
+    # test. Pinning it here is safe: unlike the platform-guard tests, this
+    # window constructs no ``Path``, which is the one thing that dispatches
+    # on ``os.name`` at call time.
+    monkeypatch.setattr(os, "name", "posix")
+
+    assert not elevation_supported()
+
+    def must_not_run(argv: object, **_kwargs: object) -> CommandResult:
+        raise AssertionError("the darwin path must not launch a process")
+
+    monkeypatch.setattr(runner, "run", must_not_run)
+
+    result = runner._run_elevated_posix(
+        ("some-manager", "pip", "install", "--", "pip"), timeout=None, cancel=None
+    )
+
+    assert not result.ok
+    assert "use pip" in result.stderr
+
+
 def test_run_elevated_resolves_the_executable_like_any_other_command(
     tmp_path: Path,
 ) -> None:
@@ -312,6 +347,9 @@ def test_run_elevated_resolves_the_executable_like_any_other_command(
         run_elevated([str(tmp_path / "definitely-not-here.exe"), "--version"])
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin", reason="macOS has no pkexec; the runner refuses there"
+)
 def test_run_elevated_without_a_mechanism_is_an_error_not_a_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -329,6 +367,9 @@ def test_run_elevated_without_a_mechanism_is_an_error_not_a_crash(
     assert "pkexec" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin", reason="macOS has no pkexec; the runner refuses there"
+)
 def test_pkexec_receives_the_command_as_an_argument_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
