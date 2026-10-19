@@ -29,6 +29,7 @@ __all__ = [
     "PackageNotFoundError",
     "PyPICache",
     "PyPIClient",
+    "ReleaseFacts",
     "pypi_info",
 ]
 
@@ -93,6 +94,34 @@ class PackageMeta:
 
 class PackageNotFoundError(ValueError):
     """The package exists locally but PyPI had no matching entry."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseFacts:
+    """What the index knows about one package's releases (SPEC 11.3).
+
+    Fetched once when a trust panel is asked for, and evaluated into flags by
+    :func:`pypackhub.core.trust.evaluate_trust`; the dates are ISO
+    ``YYYY-MM-DD`` strings because they are shown to a person, not computed
+    on. ``error`` set means the index could not be asked, which is a state
+    the panel must render differently from "everything is fine".
+    """
+
+    name: str
+    first_release: str = ""
+    releases: int = 0
+    latest_release: str = ""
+    #: Whether the newest release ships a wheel. An sdist-only package
+    #: executes code the moment it is installed; a wheel does not.
+    latest_has_wheel: bool = False
+    homepage: str = ""
+    license: str = ""
+    error: str = ""
+
+    @property
+    def known(self) -> bool:
+        """False when nothing could be fetched - distinct from "fine"."""
+        return not self.error
 
 
 class PyPICache:
@@ -198,6 +227,84 @@ class PyPIClient:
             provides_extra=tuple(pydist.get("provides_extra") or ()),
             size_bytes=pydist.get("size", 0),
             filename=pydist.get("filename", ""),
+        )
+
+    def release_facts(self, package: str) -> ReleaseFacts:
+        """The release facts the trust panel shows, or why they are unknown.
+
+        One request, no cache: the panel is asked for rarely (a selection, a
+        pending install), and a stale "first released" date would defeat the
+        one thing it exists to catch - a package published minutes ago.
+        """
+        name = validate_package_name(package)
+        url = f"{self._json_base}/{name}/json"
+
+        try:
+            payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)
+        except (HttpError, ResponseTooLargeError) as error:
+            return ReleaseFacts(name=name, error=str(error))
+
+        return self._parse_release_facts(name, payload)
+
+    @staticmethod
+    def _parse_release_facts(name: str, payload: Any) -> ReleaseFacts:
+        """Read first/latest release dates and the wheel question out of the
+        per-version file listings the JSON API returns."""
+        releases = payload.get("releases") if isinstance(payload, Mapping) else None
+        info = payload.get("info") if isinstance(payload, Mapping) else None
+        info = info if isinstance(info, Mapping) else {}
+
+        first_date = ""
+        latest_date = ""
+        latest_has_wheel = False
+        counted = 0
+
+        if isinstance(releases, Mapping):
+            for files in releases.values():
+                if not isinstance(files, list) or not files:
+                    continue
+
+                version_date = ""
+                version_has_wheel = False
+                for entry in files:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    stamp = str(
+                        entry.get("upload_time_iso_8601") or entry.get("upload_time") or ""
+                    )[:10]
+                    if stamp and (not version_date or stamp < version_date):
+                        version_date = stamp
+                    if (
+                        str(entry.get("filename", "")).endswith(".whl")
+                        or str(entry.get("packagetype", "")) == "bdist_wheel"
+                    ):
+                        version_has_wheel = True
+
+                if not version_date:
+                    continue
+                counted += 1
+                if not first_date or version_date < first_date:
+                    first_date = version_date
+                if version_date > latest_date:
+                    latest_date = version_date
+                    latest_has_wheel = version_has_wheel
+
+        homepage = str(info.get("home_page") or "").strip()
+        if not homepage and isinstance(info.get("project_urls"), Mapping):
+            for value in info["project_urls"].values():
+                candidate = str(value or "").strip()
+                if candidate.startswith(("http://", "https://")):
+                    homepage = candidate
+                    break
+
+        return ReleaseFacts(
+            name=name,
+            first_release=first_date,
+            releases=counted,
+            latest_release=latest_date,
+            latest_has_wheel=latest_has_wheel,
+            homepage=homepage,
+            license=str(info.get("license") or "").strip(),
         )
 
     # ------------------------------------------------------------------

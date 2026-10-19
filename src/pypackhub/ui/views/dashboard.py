@@ -32,12 +32,15 @@ from PySide6.QtWidgets import (
 )
 
 from pypackhub.core.deps import build_graph
+from pypackhub.core.disk_usage import EnvironmentUsage, analyse_disk_usage
 from pypackhub.core.environments import infer_purpose
 from pypackhub.core.inventory import Inventory
 from pypackhub.ui.formatting import format_bytes
 from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
+from pypackhub.ui.widgets.dialogs import DiskUsageDialog
+from pypackhub.ui.widgets.toast import ToastKind
 from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["DashboardView"]
@@ -75,6 +78,8 @@ class DashboardView(QWidget):
 
     #: From a worker thread; Qt queues it onto the GUI thread.
     orphans_ready = Signal(object)
+    #: The disk-usage analysis for this environment, from a worker thread.
+    usage_ready = Signal(object)
 
     def __init__(
         self,
@@ -91,6 +96,7 @@ class DashboardView(QWidget):
         self._vulnerable_time: str = ""
         self._orphan_count: int | None = None
         self._orphans_task: str = ""
+        self._usage_task: str = ""
         self._purpose: str = "general"
 
         self.setObjectName("dashboardPanel")
@@ -124,8 +130,13 @@ class DashboardView(QWidget):
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         layout.addWidget(self.refresh_button)
 
+        self.disk_button = QPushButton(self)
+        self.disk_button.clicked.connect(self._analyse_disk_usage)
+        layout.addWidget(self.disk_button)
+
         self.retranslate()
         self.orphans_ready.connect(self._on_orphans_ready)
+        self.usage_ready.connect(self._on_usage_ready)
 
     def _build_cards(self) -> None:
         self._headings: dict[TranslationKey, QLabel] = {}
@@ -198,6 +209,45 @@ class DashboardView(QWidget):
             self._orphan_count = len(orphans)
             self._render()
 
+    # -- disk usage -----------------------------------------------------
+
+    def _analyse_disk_usage(self) -> None:
+        """Measure the environment on a worker thread, then show the facts.
+
+        The walk covers the whole prefix and both package-manager caches, so
+        it is exactly the kind of pass that must never run on the GUI
+        thread. The dialog opens with the measurement in hand - never as a
+        promise that numbers are coming.
+        """
+        if self._usage_task:
+            return
+
+        environment = self._context.default_environment
+        self.disk_button.setEnabled(False)
+
+        def work(_task_id: str, _progress: object, _cancel: threading.Event) -> object:
+            return analyse_disk_usage(environment)
+
+        self._usage_task = self._context.tasks.schedule(
+            self._shell.text(TranslationKey.DISK_TITLE),
+            work,
+            on_finish=lambda _task_id, result: emit_if_alive(self.usage_ready, result),
+        )
+
+    def _on_usage_ready(self, result: Any) -> None:
+        """Open the analysis dialog, or say why it could not be measured."""
+        self._usage_task = ""
+        self.disk_button.setEnabled(True)
+
+        usage = result.payload if isinstance(result.payload, EnvironmentUsage) else None
+        if usage is None:
+            message = self._shell.text(TranslationKey.DISK_FAILED, error=result.error or "unknown")
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return
+
+        DiskUsageDialog(usage=usage, translator=self._shell.translator, parent=self).exec()
+
     # -- rendering ------------------------------------------------------
 
     def _render(self) -> None:
@@ -243,6 +293,7 @@ class DashboardView(QWidget):
         shell = self._shell
         self.title_label.setText(shell.text(TranslationKey.DASHBOARD_TITLE))
         self.refresh_button.setText(shell.text(TranslationKey.SNAPSHOTS_REFRESH))
+        self.disk_button.setText(shell.text(TranslationKey.DASHBOARD_DISK_USAGE))
         for key, heading in self._headings.items():
             heading.setText(shell.text(key))
         self._render()

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Literal
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion
 
 from pypackhub.core.metadata import InstalledMetadataIndex, normalize_name
 
@@ -42,7 +43,10 @@ __all__ = [
     "DependencyNode",
     "OrphanReport",
     "RemovalPreview",
+    "RequirementConflict",
     "build_graph",
+    "find_conflicts",
+    "incoming_conflicts",
 ]
 
 #: How deep a traversal goes before it stops expanding. A real dependency tree is
@@ -496,3 +500,116 @@ def _requirement_key(requirement: str) -> str:
         # ``metadata`` validates requirements on the way in, so this is a guard
         # rather than a path: an entry that cannot be parsed contributes no edge.
         return ""
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementConflict:
+    """One declared requirement the environment does not satisfy.
+
+    ``pip check`` says "httpie has requirement requests>=2.0, but you have
+    requests 1.9". This carries the same evidence without the sentence, so
+    each language can say it its own way.
+    """
+
+    #: The installed distribution that declares the requirement.
+    package: str
+    #: The requirement exactly as declared, for display.
+    requirement: str
+    #: The name the requirement is about.
+    target: str
+    #: The version the question was asked about: installed today for a
+    #: :func:`find_conflicts` answer, or about to be installed for an
+    #: :func:`incoming_conflicts` one.
+    version: str
+
+
+def _declared_requirements(metadata: object) -> tuple[str, ...]:
+    """A distribution's declared requirements, whatever its metadata object."""
+    return tuple(getattr(metadata, "requires", None) or ())
+
+
+def _specifier_allows(requirement: Requirement, version: str) -> bool | None:
+    """Whether *version* satisfies *requirement*'s specifier.
+
+    ``None`` means "cannot be answered": an unparsable version is not
+    evidence of a conflict, and neither is a specifier with no bounds
+    (which is trivially satisfied, and answered as ``True``).
+    """
+    try:
+        return requirement.specifier.contains(version, prereleases=True)
+    except InvalidVersion:
+        return None
+
+
+def find_conflicts(index: InstalledMetadataIndex) -> tuple[RequirementConflict, ...]:
+    """The ``pip check`` equivalent, with the evidence attached.
+
+    Every installed distribution is asked about every requirement it
+    declares: is it installed, and does the installed version satisfy the
+    declared range? A requirement that is *missing* is deliberately not
+    reported here - that is the graph's ``missing`` answer, and calling it
+    a conflict would show one problem twice in two words.
+    """
+    conflicts: list[RequirementConflict] = []
+
+    for metadata in index.packages.values():
+        for declared in _declared_requirements(metadata):
+            try:
+                parsed = Requirement(declared)
+            except InvalidRequirement:
+                continue  # unreadable metadata is not a fact about the environment
+
+            installed = index.get(parsed.name)
+            if installed is None or not installed.version.strip():
+                continue  # missing is the graph's answer
+
+            allowed = _specifier_allows(parsed, installed.version)
+            if allowed is False:
+                conflicts.append(
+                    RequirementConflict(
+                        package=str(getattr(metadata, "name", "?")),
+                        requirement=declared,
+                        target=parsed.name,
+                        version=installed.version,
+                    )
+                )
+
+    return tuple(sorted(conflicts, key=lambda conflict: (conflict.package, conflict.target)))
+
+
+def incoming_conflicts(
+    index: InstalledMetadataIndex, name: str, version: str
+) -> tuple[RequirementConflict, ...]:
+    """What installing *version* of *name* would break, per declared ranges.
+
+    The confirm path asks this before a pinned install or a downgrade: the
+    packages that already depend on *name* declared what they can live with,
+    and a version outside that range is a break the user can still choose
+    not to make. Requirements that say nothing about versions constrain
+    nothing and never appear here.
+    """
+    key = normalize_name(name)
+    conflicts: list[RequirementConflict] = []
+
+    for metadata in index.packages.values():
+        for declared in _declared_requirements(metadata):
+            try:
+                parsed = Requirement(declared)
+            except InvalidRequirement:
+                continue
+
+            if normalize_name(parsed.name) != key:
+                continue
+
+            allowed = _specifier_allows(parsed, version)
+            if allowed is False:
+                conflicts.append(
+                    RequirementConflict(
+                        package=str(getattr(metadata, "name", "?")),
+                        requirement=declared,
+                        target=parsed.name,
+                        version=version,
+                    )
+                )
+
+    return tuple(sorted(conflicts, key=lambda conflict: (conflict.package, conflict.target)))

@@ -52,6 +52,7 @@ from pypackhub.core.backends.base import (
 )
 from pypackhub.core.backends.pip import PipBackend
 from pypackhub.core.backends.uv import UvBackend, uv_path_in_prefix
+from pypackhub.core.deps import RequirementConflict, incoming_conflicts
 from pypackhub.core.metadata import (
     InstalledMetadataIndex,
     own_site_packages_directories,
@@ -66,6 +67,8 @@ from pypackhub.core.platform_guard import (
     modification_policy,
 )
 from pypackhub.core.runner import CommandResult, ExecutableNotFoundError, run
+from pypackhub.core.trust import TyposquatWarning, bundled_catalog
+from pypackhub.core.trust import typosquat_check as _typosquat_check
 
 __all__ = [
     "Inventory",
@@ -1096,6 +1099,39 @@ class InventoryService:
             environment=self._prefix,
             specs=specs,
             user=user,
+        )
+
+    def typosquat_check(self, name: str) -> TyposquatWarning | None:
+        """The near-miss warning for a name about to be installed, or ``None``.
+
+        Local and instant - the bundled popular-package catalogue, one scan
+        of edit distances, no network and no subprocess - so the confirm
+        path can afford it on every install (SPEC section 11.3).
+        """
+        return _typosquat_check(name, bundled_catalog().names)
+
+    def declared_conflicts(self, name: str, version: str) -> tuple[RequirementConflict, ...]:
+        """What installing *version* of *name* would break, per declared ranges.
+
+        The answer comes from the installed distributions' own metadata:
+        every package that depends on *name* declared the range it can live
+        with, and a version outside it is a break the confirm path can show
+        before it happens. A requirement without a range constrains nothing.
+        """
+        return incoming_conflicts(self.metadata_index(), name, version)
+
+    def action_for_import(self, specs: Sequence[str]) -> PackageAction:
+        """One install plan for a reviewed, chosen set of requirement specs.
+
+        An imported file's chosen lines arrive exactly like a restore's pins:
+        a set of specs installed by one command and confirmed as one
+        decision, so the installer resolves them together instead of being
+        started once per line.
+        """
+        return PackageAction(
+            kind=ActionKind.INSTALL,
+            environment=self._prefix,
+            specs=tuple(specs),
         )
 
 

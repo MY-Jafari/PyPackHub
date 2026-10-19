@@ -53,8 +53,10 @@ from pypackhub.ui.views.window_shell import QSettingsStore, WindowShell
 from pypackhub.ui.widgets.dialogs import (
     BootstrapNotice,
     ConfirmationDialog,
+    ConflictNotice,
     ElevationNotice,
     FallbackNotice,
+    TyposquatNotice,
 )
 from pypackhub.ui.widgets.log_panel import LogPanel
 
@@ -114,6 +116,12 @@ class FakeService:
         self.writable = True
         #: Whether ``invalidate_backend_state`` was called.
         self.backend_state_invalidations = 0
+        #: What ``typosquat_check`` answers; None means "the name looks fine".
+        self.typosquat_warning = None
+        #: What ``declared_conflicts`` answers for any (name, version).
+        self.conflict_entries: list[object] = []
+        #: The specs ``action_for_import`` was last asked to batch-install.
+        self.import_specs: tuple[str, ...] = ()
 
     @property
     def facts(self) -> InterpreterFacts:
@@ -201,6 +209,16 @@ class FakeService:
 
     def invalidate_backend_state(self) -> None:
         self.backend_state_invalidations += 1
+
+    def typosquat_check(self, name: str):
+        return self.typosquat_warning
+
+    def declared_conflicts(self, name: str, version: str):
+        return tuple(self.conflict_entries)
+
+    def action_for_import(self, specs):
+        self.import_specs = tuple(specs)
+        return PackageAction(kind=ActionKind.INSTALL, environment=PREFIX, specs=tuple(specs))
 
     def plan_with_backend(self, name: str, action: PackageAction) -> CommandPlan:
         """The plan the real service builds for a pip fallback, faked."""
@@ -689,7 +707,17 @@ def test_an_elevation_needing_action_is_confirmed_then_run_elevated(
     class AcceptingConfirmation:
         confirmed = True
 
-        def __init__(self, *, plan, policy, translator, elevation=None, parent=None) -> None:
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
             recorded["elevation"] = elevation
 
         def exec(self) -> int:
@@ -743,6 +771,8 @@ def test_a_missing_manager_is_installed_before_the_action_runs(
             elevation=None,
             fallback=None,
             bootstrap=None,
+            typosquat=None,
+            conflicts=None,
             parent=None,
         ) -> None:
             recorded["plan"] = plan
@@ -800,6 +830,8 @@ def test_a_bootstrap_into_a_locked_environment_runs_elevated_or_is_refused(
             elevation=None,
             fallback=None,
             bootstrap=None,
+            typosquat=None,
+            conflicts=None,
             parent=None,
         ) -> None:
             recorded["elevation"] = elevation
@@ -844,6 +876,8 @@ def test_a_missing_uv_that_cannot_reach_the_target_falls_back_to_pip(
             elevation=None,
             fallback=None,
             bootstrap=None,
+            typosquat=None,
+            conflicts=None,
             parent=None,
         ) -> None:
             recorded["fallback"] = fallback
@@ -936,6 +970,8 @@ def test_the_bootstrap_invalidates_what_was_probed_about_the_managers(
             elevation=None,
             fallback=None,
             bootstrap=None,
+            typosquat=None,
+            conflicts=None,
             parent=None,
         ) -> None:
             pass
@@ -967,6 +1003,8 @@ def test_declining_the_bootstrap_offer_installs_nothing(
             elevation=None,
             fallback=None,
             bootstrap=None,
+            typosquat=None,
+            conflicts=None,
             parent=None,
         ) -> None:
             pass
@@ -1031,7 +1069,16 @@ def test_an_action_the_backend_cannot_reach_is_offered_to_pip_instead(
         confirmed = True
 
         def __init__(
-            self, *, plan, policy, translator, elevation=None, fallback=None, parent=None
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
         ) -> None:
             recorded["plan"] = plan
             recorded["fallback"] = fallback
@@ -1064,7 +1111,16 @@ def test_declining_the_pip_offer_runs_nothing(
         confirmed = False
 
         def __init__(
-            self, *, plan, policy, translator, elevation=None, fallback=None, parent=None
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
         ) -> None:
             pass
 
@@ -1108,7 +1164,17 @@ def test_elevation_never_happens_without_an_explicit_confirmation(
     class RefusingConfirmation:
         confirmed = False
 
-        def __init__(self, *, plan, policy, translator, elevation=None, parent=None) -> None:
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
             pass
 
         def exec(self) -> int:
@@ -1339,3 +1405,224 @@ def test_undo_without_a_snapshot_says_so(view: PackagesView, service: FakeServic
     assert not view._run_task
     assert service.elevated_calls == []
     assert messages and EN_TABLE[TranslationKey.HISTORY_UNDO_UNAVAILABLE] in messages[0]
+
+
+# -- the supply-chain and requirements phase -------------------------------------
+
+
+def _install_request() -> PackageAction:
+    return PackageAction(kind=ActionKind.INSTALL, environment=PREFIX, specs=("requests==2.31.0",))
+
+
+def _recording_confirmation(recorded: dict[str, object]) -> type:
+    """A confirmation fake that records every notice it was handed."""
+
+    class Accepting:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            recorded["typosquat"] = typosquat
+            recorded["conflicts"] = conflicts
+            recorded["plan"] = plan
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    return Accepting
+
+
+def test_a_typosquatted_install_warns_in_the_confirmation(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The name is one letter away from a package everybody installs: the
+    confirmation says so before the button next to the warning is pressed."""
+    from pypackhub.core.trust import TyposquatWarning
+
+    service.typosquat_warning = TyposquatWarning(name="reqeusts", suspect_of="requests")
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", _recording_confirmation(recorded))
+
+    assert view.confirm_and_run(_install_request())
+    warning = recorded["typosquat"]
+    assert isinstance(warning, TyposquatNotice)
+    assert warning.warning.suspect_of == "requests"
+
+
+def test_a_clean_install_carries_no_supply_chain_warnings(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """Confirmations are off in the fake policy, so a clean name forces
+    nothing: no dialog is manufactured, no warning is invented."""
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", _recording_confirmation(recorded))
+
+    assert view.confirm_and_run(_install_request())
+    assert not recorded
+
+
+def test_a_pinned_downgrade_warns_about_the_ranges_it_breaks(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The declared constraints of installed dependents, before the break."""
+    from pypackhub.core.deps import RequirementConflict
+
+    service.conflict_entries = [
+        RequirementConflict(
+            package="httpie",
+            requirement="requests>=2.28",
+            target="requests",
+            version="2.0.0",
+        )
+    ]
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", _recording_confirmation(recorded))
+
+    action = PackageAction(
+        kind=ActionKind.DOWNGRADE, environment=PREFIX, names=("requests",), version="2.0.0"
+    )
+    assert view.confirm_and_run(action)
+
+    conflicts = recorded["conflicts"]
+    assert isinstance(conflicts, ConflictNotice)
+    assert conflicts.entries[0].package == "httpie"
+
+
+def test_import_reads_reviews_and_installs_the_chosen_lines(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch, tmp_path: Path
+) -> None:
+    """An untrusted file goes through the parser, the review and one batch.
+
+    The lines the parser refused cannot be selected back in; the lines it
+    flagged start unselected; what the user ratifies reaches the one
+    confirm-and-run path as a single install.
+    """
+    target = tmp_path / "requirements.txt"
+    target.write_text(
+        "\n".join(
+            (
+                "requests==2.31.0",
+                "# just a comment",
+                "--index-url https://mirror.example/simple",
+                "urllib3==2.2.0",
+                "not a valid spec!!",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        packages_module.QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *args, **kwargs: (str(target), "")),
+    )
+
+    reviewed: dict[str, object] = {}
+
+    class AcceptingPreview:
+        def __init__(self, *, parsed, translator, parent=None) -> None:
+            reviewed["parsed"] = parsed
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+        def selected_specs(self) -> tuple[str, ...]:
+            return ("requests==2.31.0",)
+
+    monkeypatch.setattr(packages_module, "ImportPreviewDialog", AcceptingPreview)
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", _recording_confirmation({}))
+
+    view._import_requested()
+    qtbot.waitUntil(lambda: bool(view._run_task), timeout=5000)
+
+    parsed = reviewed["parsed"]
+    assert parsed.review, "the option line must reach the review"
+    assert parsed.invalid, "the garbage line must be refused"
+    assert service.import_specs == ("requests==2.31.0",)
+
+
+def test_export_writes_a_sorted_pinned_file(
+    view: PackagesView, service: FakeService, monkeypatch, tmp_path: Path
+) -> None:
+    """What is installed, pinned, sorted - and nothing that cannot install."""
+    view._inventory = Inventory(
+        environment=PREFIX,
+        backend="pip",
+        rows=(
+            PackageRow(name="urllib3", installed="2.2.0"),
+            PackageRow(name="requests", installed="2.31.0"),
+            PackageRow(name="broken", installed=""),
+        ),
+    )
+    target = tmp_path / "requirements.txt"
+    monkeypatch.setattr(
+        packages_module.QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *args, **kwargs: (str(target), "")),
+    )
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    view._export_requested()
+
+    assert target.read_text(encoding="utf-8") == "requests==2.31.0\nurllib3==2.2.0\n"
+    # The raw table entry is the template; the message is it, interpolated.
+    assert messages and messages[0] == EN_TABLE[TranslationKey.PACKAGES_EXPORT_WRITTEN].replace(
+        "%(path)s", str(target)
+    )
+
+
+# -- layout ----------------------------------------------------------------------
+
+
+def test_no_toolbar_button_is_ever_squeezed_below_its_text(qtbot, view: PackagesView) -> None:
+    """The toolbar's own lesson: one row of eight buttons clipped half of them.
+
+    The single row's minimum width was 1700+ pixels - wider than the window
+    at any size it allows - so the layout squeezed buttons to ~86px and their
+    labels ended mid-word. The two-row toolbar fits the packages pane at the
+    window's stated minimum with room to spare, and this test keeps it that
+    way: a future control that makes a row overflow again fails here instead
+    of shipping clipped text.
+    """
+    qtbot.addWidget(view)
+    # 740px is the packages pane's width at the 960px window minimum, with
+    # the default sidebar: the tightest width the application promises to
+    # lay out correctly.
+    view.resize(740, 600)
+    view.show()
+    qtbot.waitUntil(lambda: view.install_button.width() > 0, timeout=5000)
+
+    from PySide6.QtWidgets import QPushButton
+
+    buttons = [
+        widget
+        for widget in (
+            view.refresh_button,
+            view.export_button,
+            view.import_button,
+            view.install_button,
+            view.upgrade_button,
+            view.downgrade_button,
+            view.uninstall_button,
+            view.upgrade_all_button,
+        )
+        if isinstance(widget, QPushButton)
+    ]
+    for button in buttons:
+        needed = button.minimumSizeHint().width()
+        assert button.width() >= needed - 2, (
+            f"{button.text()!r} is squeezed to {button.width()}px "
+            f"(needs {needed}px) - the toolbar row overflows again"
+        )

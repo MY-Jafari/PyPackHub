@@ -40,7 +40,13 @@ from PySide6.QtWidgets import (
 )
 
 from pypackhub.core.backends.base import PackageAction
-from pypackhub.core.deps import DependencyGraph, Direction, build_graph
+from pypackhub.core.deps import (
+    DependencyGraph,
+    Direction,
+    RequirementConflict,
+    build_graph,
+    find_conflicts,
+)
 from pypackhub.core.metadata import InstalledMetadataIndex, normalize_name
 from pypackhub.core.tasks import TaskResult
 from pypackhub.ui.formatting import format_bytes
@@ -79,6 +85,9 @@ class DependenciesView(QWidget):
         self._index: InstalledMetadataIndex | None = None
         self._scan_task: str = ""
         self._selected_key: str = ""
+        # The conflict scan's last answer, kept so a language change can say
+        # the same sentences in the other language.
+        self._conflicts: tuple[RequirementConflict, ...] = ()
         # name -> measured bytes, offered by the packages view when it has already
         # measured them; empty means the orphan sizes are simply unknown.
         self._size_source: dict[str, int | None] = {}
@@ -170,7 +179,19 @@ class DependenciesView(QWidget):
         right_layout.addStretch(1)
         layout.addWidget(splitter, 1)
 
-        # -- bottom: what can go ----------------------------------------------
+        # -- bottom: what does not add up, then what can go -------------------
+        conflicts_group, conflicts_layout = self._group(layout, TranslationKey.DEPS_CONFLICTS)
+        self.conflicts_note = QLabel(conflicts_group)
+        self.conflicts_note.setObjectName("secondaryText")
+        self.conflicts_note.setWordWrap(True)
+        conflicts_layout.addWidget(self.conflicts_note)
+
+        self.conflicts_list = QListWidget(conflicts_group)
+        self.conflicts_list.setObjectName("conflictList")
+        self.conflicts_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.conflicts_list.setMaximumHeight(110)
+        conflicts_layout.addWidget(self.conflicts_list)
+
         orphans_group, orphans_layout = self._group(layout, TranslationKey.DEPS_ORPHANS)
         self.orphans_note = QLabel(orphans_group)
         self.orphans_note.setObjectName("secondaryText")
@@ -200,6 +221,7 @@ class DependenciesView(QWidget):
 
         self._update_details(None)
         self._update_orphans(None)
+        self._update_conflicts(())
 
     def _group(
         self, layout: QVBoxLayout | QHBoxLayout, key: TranslationKey
@@ -245,7 +267,9 @@ class DependenciesView(QWidget):
             # metadata from disappearing out of the graph entirely.
             inventory = service.list()
             names = tuple(row.name for row in inventory.rows)
-            return build_graph(index, installed_names=names)
+            # The pip-check equivalent rides the same pass: the metadata is
+            # already read, so the conflict scan costs the comparison alone.
+            return (build_graph(index, installed_names=names), find_conflicts(index))
 
         self._scan_task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.DEPS_TITLE),
@@ -255,25 +279,41 @@ class DependenciesView(QWidget):
 
     def _on_graph_ready(self, result: TaskResult) -> None:
         self._scan_task = ""
-        graph = result.payload if isinstance(result.payload, DependencyGraph) else None
+
+        # The payload has carried a bare graph since this view existed and a
+        # (graph, conflicts) pair since the conflict scan joined the pass;
+        # both are accepted so the seam stays drivable either way.
+        payload = result.payload
+        if isinstance(payload, tuple) and payload:
+            graph = payload[0] if isinstance(payload[0], DependencyGraph) else None
+            conflicts = tuple(payload[1]) if len(payload) > 1 else ()
+        else:
+            graph = payload if isinstance(payload, DependencyGraph) else None
+            conflicts = ()
 
         if graph is None:
             message = self._shell.text(TranslationKey.DEPS_FAILED, error=result.error or "unknown")
             self.status_changed.emit(message)
             return
 
-        self.show_graph(graph)
+        self.show_graph(graph, conflicts=conflicts)
         self.status_changed.emit(self._shell.text(TranslationKey.DEPS_SCANNED, count=len(graph)))
 
-    def show_graph(self, graph: DependencyGraph) -> None:
+    def show_graph(
+        self, graph: DependencyGraph, *, conflicts: tuple[RequirementConflict, ...] = ()
+    ) -> None:
         """Render an already-built graph.
 
         The seam between the worker thread and the page, and the one a test can
-        drive without a task queue or a subprocess behind it.
+        drive without a task queue or a subprocess behind it. *conflicts* is
+        optional because the graph alone answers the page's first three
+        questions; the conflict scan is the fourth and a caller may not have
+        run it.
         """
         self._graph = graph
         self._populate_packages(graph)
         self._update_orphans(graph)
+        self._update_conflicts(conflicts)
         self._update_details(self._selected_key or None)
 
     def _populate_packages(self, graph: DependencyGraph) -> None:
@@ -468,6 +508,37 @@ class DependenciesView(QWidget):
             )
         )
 
+    def _update_conflicts(self, conflicts: tuple[RequirementConflict, ...]) -> None:
+        """The pip-check equivalent, in sentences a person can read.
+
+        Every line carries the evidence: who declares the requirement, what
+        range was declared, and the version that is actually installed. The
+        satisfied case is stated once, in the group's own words, because an
+        empty section would read as "never checked".
+        """
+        self._conflicts = conflicts
+        self.conflicts_list.clear()
+
+        if not conflicts:
+            self.conflicts_list.setVisible(False)
+            self.conflicts_note.setText(self._shell.text(TranslationKey.DEPS_CONFLICTS_NONE))
+            self.conflicts_note.setVisible(True)
+            return
+
+        self.conflicts_note.setVisible(False)
+        self.conflicts_list.setVisible(True)
+        for conflict in conflicts:
+            QListWidgetItem(self._conflict_text(conflict), self.conflicts_list)
+
+    def _conflict_text(self, conflict: RequirementConflict) -> str:
+        """One conflict, as the language in force says it."""
+        return self._shell.text(
+            TranslationKey.CONFLICT_LINE,
+            package=conflict.package,
+            requirement=conflict.requirement,
+            version=conflict.version,
+        )
+
     def _measured_sizes(self, graph: DependencyGraph) -> dict[str, int]:
         """Measured sizes for the orphans, so the report can total them.
 
@@ -553,3 +624,6 @@ class DependenciesView(QWidget):
             self._populate_packages(self._graph)
             self._update_orphans(self._graph)
             self._update_details(self._selected_key or None)
+        # The conflict lines are sentences, so they are rebuilt here rather
+        # than left answering in the previous language.
+        self._update_conflicts(self._conflicts)

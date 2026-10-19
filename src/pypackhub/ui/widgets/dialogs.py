@@ -24,18 +24,31 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from pypackhub.core.backends.base import ActionKind, CommandPlan
-from pypackhub.core.deps import RemovalPreview
+from pypackhub.core.deps import RemovalPreview, RequirementConflict
+from pypackhub.core.disk_usage import EnvironmentUsage
 from pypackhub.core.platform_guard import ModificationPolicy, Severity
-from pypackhub.core.validation import ValidationError, validate_package_spec
+from pypackhub.core.trust import TyposquatWarning
+from pypackhub.core.validation import (
+    LineKind,
+    ParsedRequirements,
+    RequirementLine,
+    ValidationError,
+    validate_package_spec,
+)
+from pypackhub.ui.formatting import format_bytes
 from pypackhub.ui.i18n.reasons import reason_text
 from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.i18n.translator import Translator
@@ -97,6 +110,30 @@ class BootstrapNotice:
     commands: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class TyposquatNotice:
+    """What a confirmation has to say when the name may be a mistyping.
+
+    Carries the typosquat module's answer; the dialog renders the warning
+    ("did you mean X?") in the user's language, loud enough that it is read
+    before the button next to it is pressed.
+    """
+
+    warning: TyposquatWarning
+
+
+@dataclass(frozen=True, slots=True)
+class ConflictNotice:
+    """What a confirmation has to say about declared ranges this breaks.
+
+    One entry per installed package whose declared requirement the version
+    about to be installed does not satisfy. The sentences are built by the
+    dialog so each language can say them its own way; the evidence travels.
+    """
+
+    entries: tuple[RequirementConflict, ...] = ()
+
+
 #: The dialog title for each action.
 _TITLE_KEYS: dict[ActionKind, TranslationKey] = {
     ActionKind.INSTALL: TranslationKey.CONFIRM_INSTALL_TITLE,
@@ -143,6 +180,8 @@ class ConfirmationDialog(QDialog):
         elevation: ElevationNotice | None = None,
         fallback: FallbackNotice | None = None,
         bootstrap: BootstrapNotice | None = None,
+        typosquat: TyposquatNotice | None = None,
+        conflicts: ConflictNotice | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -152,6 +191,8 @@ class ConfirmationDialog(QDialog):
         self._elevation = elevation
         self._fallback = fallback
         self._bootstrap = bootstrap
+        self._typosquat = typosquat
+        self._conflicts = conflicts
 
         self.setObjectName("confirmationDialog")
         self.setModal(True)
@@ -237,9 +278,26 @@ class ConfirmationDialog(QDialog):
         self.bootstrap_label.setWordWrap(True)
         self.bootstrap_label.setVisible(False)
         layout.addWidget(self.bootstrap_label)
+
+        # Supply-chain warnings render louder than the policy notices: a
+        # typosquat is the one thing here that can be an attack, and the
+        # safety-tinted notice is the strongest cue the theme has.
+        self.typosquat_label = QLabel(self)
+        self.typosquat_label.setObjectName("safetyNotice")
+        self.typosquat_label.setWordWrap(True)
+        self.typosquat_label.setVisible(False)
+        layout.addWidget(self.typosquat_label)
+
+        self.conflicts_label = QLabel(self)
+        self.conflicts_label.setObjectName("policyNotice")
+        self.conflicts_label.setWordWrap(True)
+        self.conflicts_label.setVisible(False)
+        layout.addWidget(self.conflicts_label)
         self._describe_elevation()
         self._describe_fallback()
         self._describe_bootstrap()
+        self._describe_typosquat()
+        self._describe_conflicts()
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -413,6 +471,61 @@ class ConfirmationDialog(QDialog):
 
         self.bootstrap_label.setText(text)
         self.bootstrap_label.setVisible(True)
+
+    def _describe_typosquat(self) -> None:
+        """Say the name may be a mistyping of a popular package.
+
+        The classic supply-chain trick is a name one letter away from
+        something everybody installs, banking on the typo being repeated
+        without being re-read. The warning shows the exact distance in
+        words - "one letter away from X, did you mean X?" - because the way
+        out is the reader noticing, not the tool refusing.
+        """
+        if self._typosquat is None:
+            return
+
+        translator = self._translator
+        warning = self._typosquat.warning
+        text = "\n\n".join(
+            (
+                translator.translate(TranslationKey.CONFIRM_TYPOSQUAT_TITLE),
+                translator.translate(
+                    TranslationKey.CONFIRM_TYPOSQUAT_REASON,
+                    name=warning.name,
+                    popular=warning.suspect_of,
+                ),
+            )
+        )
+
+        self.typosquat_label.setText(text)
+        self.typosquat_label.setVisible(True)
+
+    def _describe_conflicts(self) -> None:
+        """List the declared requirements the incoming version breaks.
+
+        These are facts the installed distributions state about themselves:
+        who requires what range, and the version that is about to be
+        installed anyway. Shown before approval so "yes" is an informed
+        choice; the warnings are advisory, exactly like the spec's
+        impact-warnings rule asks.
+        """
+        if self._conflicts is None or not self._conflicts.entries:
+            return
+
+        translator = self._translator
+        lines = [
+            translator.translate(
+                TranslationKey.CONFLICT_LINE,
+                package=conflict.package,
+                requirement=conflict.requirement,
+                version=conflict.version,
+            )
+            for conflict in self._conflicts.entries
+        ]
+        text = "\n\n".join((translator.translate(TranslationKey.CONFIRM_CONFLICT_TITLE), *lines))
+
+        self.conflicts_label.setText(text)
+        self.conflicts_label.setVisible(True)
 
 
 class BlockedDialog(QDialog):
@@ -1093,3 +1206,230 @@ class DowngradeDialog(QDialog):
 
     def _clear_error(self) -> None:
         self.error_label.setVisible(False)
+
+
+class ImportPreviewDialog(QDialog):
+    """The review an imported requirements file goes through (SPEC 11.2).
+
+    The file is untrusted input and the parser has already made a decision
+    about every line; this dialog is where the human ratifies those
+    decisions. Plain package lines start checked, anything the parser marked
+    for review starts unchecked with its reason, and an invalid line cannot
+    be selected at all. What the dialog hands back is what the user chose -
+    never "the whole file", and never a line the parser refused.
+    """
+
+    def __init__(
+        self,
+        *,
+        parsed: ParsedRequirements,
+        translator: Translator,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._translator = translator
+        self._parsed = parsed
+        self.setObjectName("importDialog")
+        self.setModal(True)
+        self.setMinimumWidth(640)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(translator.translate(TranslationKey.IMPORT_TITLE), self)
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+
+        source = QLabel(
+            f"{translator.translate(TranslationKey.IMPORT_FILE)}: {parsed.source}", self
+        )
+        source.setObjectName("mutedText")
+        source.setWordWrap(True)
+        layout.addWidget(source)
+
+        hint = QLabel(translator.translate(TranslationKey.IMPORT_SELECT), self)
+        hint.setObjectName("secondaryText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.setObjectName("importList")
+        # The lines the list actually shows, in list order: comments are
+        # skipped below, so list rows and ``parsed.lines`` indices diverge
+        # the moment a file has a comment - this list is the row -> line
+        # mapping, and it is the only one consulted on the way back out.
+        self._rows: list[RequirementLine] = []
+        for line in parsed.lines:
+            if line.kind is LineKind.COMMENT:
+                continue  # the file's own words are not a decision to ratify
+            item = QListWidgetItem(line.raw)
+            if line.kind is LineKind.INVALID:
+                # Untouchable: the parser refused this line, and the review
+                # must not be able to un-refuse it.
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                if line.reason:
+                    item.setToolTip(line.reason)
+            elif line.is_package:
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if not line.requires_review else Qt.CheckState.Unchecked
+                )
+                if line.requires_review and line.reason:
+                    item.setToolTip(line.reason)
+            else:
+                # An option line (-r, --index-url, ...): shown with its reason,
+                # deliberately inert. This flow installs specs, and an
+                # installer option cannot be honoured by installing specs -
+                # a checkbox that changes nothing is a lie, so there is none.
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                if line.reason:
+                    item.setToolTip(line.reason)
+            self.list_widget.addItem(item)
+            self._rows.append(line)
+        self.list_widget.itemChanged.connect(lambda _item: self._update_footer())
+        layout.addWidget(self.list_widget, 1)
+
+        self.count_label = QLabel(self)
+        self.count_label.setObjectName("mutedText")
+        layout.addWidget(self.count_label)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self._update_footer()
+
+    def selected_specs(self) -> tuple[str, ...]:
+        """The specs the user chose, in file order - the installable subset."""
+        chosen: list[str] = []
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if (
+                item is not None
+                and item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+                and item.checkState() is Qt.CheckState.Checked
+            ):
+                # Through the row -> line map, never the parsed file's own
+                # indices: a comment anywhere above shifts those.
+                line = self._rows[row]
+                if line.is_package and line.value:
+                    chosen.append(line.value)
+        return tuple(chosen)
+
+    def _update_footer(self) -> None:
+        translator = self._translator
+        selected = self.selected_specs()
+        selectable = len(selected) + sum(
+            1
+            for row in range(self.list_widget.count())
+            if (item := self.list_widget.item(row)) is not None
+            and item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+            and item.checkState() is not Qt.CheckState.Checked
+        )
+
+        self.count_label.setText(
+            translator.translate(
+                TranslationKey.IMPORT_LINE_COUNT, count=len(selected), total=selectable
+            )
+        )
+        ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok is not None:
+            ok.setText(
+                translator.translate(TranslationKey.IMPORT_CONFIRM, count=len(selected))
+                if selected
+                else translator.translate(TranslationKey.IMPORT_NOTHING_SELECTED)
+            )
+            ok.setEnabled(bool(selected))
+
+
+class DiskUsageDialog(QDialog):
+    """A read-only disk-usage analysis of one environment.
+
+    Everything on the page was measured, none of it is guessed, and nothing
+    here deletes anything: cache cleaning is a change to the machine and
+    belongs behind a confirmation like every other change. The bars are
+    proportioned against the largest measured package, so the eye can rank
+    consumers without reading a number.
+    """
+
+    def __init__(
+        self,
+        *,
+        usage: EnvironmentUsage,
+        translator: Translator,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("diskDialog")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(translator.translate(TranslationKey.DISK_TITLE), self)
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+
+        total = QLabel(
+            f"{translator.translate(TranslationKey.DISK_TOTAL)}: "
+            f"{format_bytes(usage.total_bytes)}  \u00b7  "
+            f"{translator.translate(TranslationKey.DISK_FILES, count=usage.files)}",
+            self,
+        )
+        total.setObjectName("versionLabel")
+        layout.addWidget(total)
+
+        if not usage.complete:
+            floor = QLabel(translator.translate(TranslationKey.DISK_INCOMPLETE), self)
+            floor.setObjectName("mutedText")
+            floor.setWordWrap(True)
+            layout.addWidget(floor)
+
+        largest_header = QLabel(translator.translate(TranslationKey.DISK_LARGEST), self)
+        largest_header.setObjectName("secondaryText")
+        layout.addWidget(largest_header)
+
+        widest = usage.packages[0].size_bytes if usage.packages else 0
+        for package in usage.packages:
+            row = QHBoxLayout()
+            name = QLabel(package.name, self)
+            name.setMinimumWidth(160)
+            row.addWidget(name)
+            bar = QProgressBar(self)
+            bar.setRange(0, max(widest, 1))
+            bar.setValue(package.size_bytes)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(8)
+            row.addWidget(bar, 1)
+            size = QLabel(format_bytes(package.size_bytes), self)
+            size.setObjectName("mutedText")
+            size.setMinimumWidth(80)
+            row.addWidget(size)
+            layout.addLayout(row)
+
+        caches_header = QLabel(translator.translate(TranslationKey.DISK_CACHES), self)
+        caches_header.setObjectName("secondaryText")
+        layout.addWidget(caches_header)
+
+        for cache in usage.caches:
+            value = (
+                format_bytes(cache.size_bytes)
+                if cache.exists
+                else translator.translate(TranslationKey.DISK_CACHE_MISSING)
+            )
+            cache_line = QLabel(f"{cache.kind}: {value}  \u00b7  {cache.path}", self)
+            cache_line.setObjectName("mutedText")
+            cache_line.setWordWrap(True)
+            layout.addWidget(cache_line)
+
+        layout.addStretch(1)
+
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        close.accepted.connect(self.accept)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)

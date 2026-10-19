@@ -54,7 +54,7 @@ nothing here is available as a release yet. This table is kept honest on purpose
 | History: every recorded action, undoable through its snapshot | ✅ done |
 | uv on all-users Pythons: per-action administrator prompts, pip offered when the user site shadows the target | ✅ done |
 | Stand-alone installers for Windows, Linux and macOS, plus automatic releases | ✅ done (publishes when a `v*` tag is pushed) |
-| Trust panel and typosquatting warnings, import/export, conflict checks, disk-usage analysis | 📋 later phases |
+| Trust panel and typosquatting warnings, import/export, conflict checks, disk-usage analysis | ✅ done (phase 2) |
 | conda/mamba, poetry, pipx, pipenv and pdm backends | 📋 later phases |
 
 The full plan, the phase breakdown and every decision taken so far live in
@@ -163,12 +163,20 @@ their answers on screen rather than re-fetching them behind your back.
   found affected, how much measured space they take up, and what the
   environment is probably *for* — a deterministic guess from the packages it
   carries, shown with the last scan's time so a stale number can be recognised
-  as one.
+  as one. Its **Analyse disk usage** button opens a measured breakdown: the
+  whole environment, the largest packages drawn as bars against each other,
+  and what pip's and uv's download caches hold — inspection only, because
+  deleting is a change and goes through a confirmation like every other.
 * **Packages** lists what is installed, with the status, the version and (once
   measured) the size of each package. Search filters the table, the *outdated*
   check narrows it to packages behind the index, and the columns sort. A refresh
   shows a spinner while the list loads. Selecting a row fills the detail panel on
-  the right; double-clicking it pins the panel to that package.
+  the right; double-clicking it pins the panel to that package. Two buttons move
+  the installed state in and out as a `requirements.txt`: **Export** writes the
+  installed versions, every line validated on the way out; **Import** reads an
+  untrusted file, shows every line with the decision already made about it —
+  plain packages checked, anything that needs review unchecked with its reason,
+  refused lines locked — and installs what you ratify as one confirmed batch.
 * **Environments** lists every Python environment PyPackHub found, what kind each
   one is, and lets you switch to it with one click. Switching also moves the
   package table and the top-bar selector, so the whole window agrees on one
@@ -178,17 +186,29 @@ their answers on screen rather than re-fetching them behind your back.
   lookups at a time, with results filling in as they arrive. Selecting a result
   fetches its release history, so you can install the latest or pin an exact
   version you picked — through the same confirmation as every other action.
+  The selection also fills a **trust** block: when the package was first
+  released, how many releases it has, when the latest one shipped, and the
+  signals that matter before installing — brand-new, dormant, sdist-only,
+  no home page — plus a "did you mean X?" warning when the name you typed is
+  one letter from a popular package.
 * **Changing something** — install, uninstall, upgrade, downgrade, upgrade all —
   goes through one path: the plan is built, the platform guard decides whether the
   environment may be changed at all, and a confirmation shows the *exact* command
   and the environment it targets before anything runs. Nothing changes silently,
   and an automatic snapshot of the installed state is written first, so every
-  action is one you can undo.
+  action is one you can undo. When the name being installed is one letter away
+  from a popular package, or the pinned version breaks a range an installed
+  package already declares, the confirmation says so before you press the
+  button — and turning confirmations off does not silence those two warnings.
 * **Dependencies** answers three questions in the order people ask them. Select a
   package and it says *why* it is installed — the chain of package names from the
   one you asked for down to this one, or plainly that nothing needs it — then shows
   what it requires and what requires it, both as trees, and flags anything it
-  declares that is not installed. Below that it lists the packages nothing needs
+  declares that is not installed. Below the trees a **version conflicts** section
+  is the `pip check` equivalent in plain language: which installed package
+  declared which range, and which installed version does not satisfy it — with
+  the satisfied case stated too, so an empty section never reads as "never
+  checked". At the bottom it lists the packages nothing needs
   and you never asked for by name, and offers a **preview** before they go.
 * **Security** scans the installed packages against the [OSV.dev](https://osv.dev)
   vulnerability database — only when you press the button, and sending only each
@@ -288,6 +308,9 @@ src/pypackhub/
     metadata.py        # installed dist-info metadata and dependency data
     deps.py            # the dependency graph and clean-up built on it
     sizes.py           # disk usage of installed packages
+    disk_usage.py      # whole-environment analysis: totals, largest consumers, cache sizes
+    trust.py           # typosquatting detection against the bundled catalogue, trust signals
+    exporter.py        # requirements.txt export, validated line by line
     pypi.py            # versions, metadata, TTL cache
     search.py          # what to look up: bundled catalogue ranking + index resolution
     security.py        # OSV.dev vulnerability scanning (name==version only)
@@ -306,10 +329,6 @@ src/pypackhub/
 
 tests/           # unit tests, plus tests/security for the security guarantees
 ```
-
-`trust.py` (typosquatting and supply-chain signals) is planned but not written
-yet, so it is deliberately absent from the tree above rather than listed as if
-it existed.
 
 Three rules hold the design together, and each is enforced by a test rather
 than by discipline:
@@ -414,7 +433,7 @@ conda/mamba، poetry، pipx، pipenv و pdm ساخته شده است، تا دی
 | تاریخچه: هر کار ضبط‌شده، واگردانی از طریق نقطهٔ بازیابی‌اش | ✅ انجام شده |
 | uv روی پایتون‌های همه‌کاربر: درخواست دسترسی مدیریتی برای هر کار، و پیشنهاد pip وقتی site کاربر هدف را سایه می‌اندازد | ✅ انجام شده |
 | برنامه‌های نصبی ویندوز، لینوکس و مک به‌همراه انتشار خودکار | ✅ انجام شده (با زدن برچسب `v*` منتشر می‌شود) |
-| پنل اعتماد و هشدارهای شبیه‌سازی نام، درون‌ریزی/برون‌ریزی، بررسی تعارض، تحلیل مصرف دیسک | 📋 فازهای بعدی |
+| پنل اعتماد و هشدارهای شبیه‌سازی نام، درون‌ریزی/برون‌ریزی، بررسی تعارض، تحلیل مصرف دیسک | ✅ انجام شده (فاز ۲) |
 | پشتیبان‌های conda/mamba، poetry، pipx، pipenv و pdm | 📋 فازهای بعدی |
 
 برنامهٔ کامل، تقسیم‌بندی فازها و همهٔ تصمیم‌های گرفته‌شده در
@@ -522,13 +541,21 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
   گراف وابستگی)، چند بسته در آخرین بررسی امنیتی آسیب‌پذیر پیدا شد، چند فضا
   اندازه‌گیری‌شده گرفته‌اند، و این محیط احتمالاً برای چیست — حدسی قطعی از
   روی بسته‌هایش، همراه با زمان آخرین بررسی تا پاسخ کهنه به‌عنوان کهنه شناخته
-  شود.
+  شود. دکمهٔ **تحلیل مصرف دیسک** آن، تصویر اندازه‌گیری‌شده را باز می‌کند: کل
+  محیط، بزرگ‌ترین بسته‌ها به‌صورت میله‌های متناسب، و آنچه حافظه‌های پنهانیِ
+  دانلودِ pip و uv در خود دارند — فقط نگاه‌کردن، چون حذف‌کردن تغییر است و
+  مثل هر تغییر دیگری از تأیید می‌گذرد.
 * **بسته‌ها** آنچه نصب است را همراه با وضعیت، نسخه و (پس از اندازه‌گیری) اندازهٔ
   هر بسته نشان می‌دهد. جست‌وجو جدول را فیلتر می‌کند، گزینهٔ *فقط به‌روزنشده‌ها*
   آن را به بسته‌های عقب‌مانده از نمایه محدود می‌کند و ستون‌ها مرتب می‌شوند.
   هنگام تازه‌سازی، تا آماده‌شدن فهرست یک نشانگر چرخان نمایش داده می‌شود. انتخاب
   یک سطر، پنل جزئیات را در سمت راست پر می‌کند؛ دوبار کلیک آن را روی همان بسته
-  ثابت نگه می‌دارد.
+  ثابت نگه می‌دارد. دو دکمه وضعیت نصب را به‌صورت `requirements.txt` بیرون و
+  داخل می‌برند: **برون‌بری** نسخه‌های نصب‌شده را می‌نویسد و هر خط را در
+  لحظهٔ نوشتن اعتبارسنجی می‌کند؛ **درون‌ریزی** فایلی نامطمئن را می‌خواند و هر
+  خط را با تصمیمی که از پیش درباره‌اش گرفته شده نشان می‌دهد — بسته‌های ساده
+  تیک‌خورده، هرچه بازبینی می‌خواهد بی‌تیک با دلیلش، خط‌های ردشده قفل — و
+  آنچه شما تأیید کنید را به‌صورت یک دستهٔ تأییدشده نصب می‌کند.
 * **محیط‌ها** هر محیط پایتونی که پای‌پک‌هاب یافته را همراه با نوع آن فهرست
   می‌کند و با یک کلیک به آن سوییچ می‌شوید. سوییچ، جدول بسته‌ها و انتخاب‌گر نوار
   بالا را هم همراه خود می‌برد، تا تمام پنجره بر یک محیط «فعلی» توافق داشته
@@ -537,17 +564,28 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
   از بسته‌های محبوب رتبه‌بندی و با نمایهٔ زنده حل می‌شود، چند نگاه هم‌زمان، و
   نتایج همان‌طور که می‌رسند پر می‌شوند. انتخاب یک نتیجه، تاریخچهٔ انتشارش را
   می‌آورد تا آخرین نسخه را نصب کنید یا دقیقاً نسخه‌ای را که خودتان برداشته‌اید
-  سنجاق کنید — از همان مسیر تأیید که هر کار دیگر می‌گذرد.
+  سنجاق کنید — از همان مسیر تأیید که هر کار دیگر می‌گذرد. همان انتخاب بلوک
+  **اعتماد** را هم پر می‌کند: نخستین انتشار چه زمانی بوده، چند انتشار دارد،
+  آخرین انتشار کِی بوده، و نشانه‌هایی که پیش از نصب مهم‌اند — تازه‌سراغ، خاموش،
+  فقط-sdist، بدون صفحهٔ خانه — به‌همراه هشدار «منظورتان این بود؟» وقتی نامی که
+  نوشته‌اید فقط یک حرف با یک بستهٔ محبوب فاصله دارد.
 * **تغییر دادن چیزی** — نصب، حذف، ارتقا، نصب نسخهٔ قدیمی‌تر، ارتقای همه — از یک
   مسیر می‌گذرد: نقشه ساخته می‌شود، نگهبان سکو تصمیم می‌گیرد آیا این محیط اصلاً
   قابل تغییر است، و یک تأییدیه *دستور دقیق* و محیط هدف را پیش از هر اجرا نشان
   می‌دهد. هیچ‌چیز بی‌صدا تغییر نمی‌کند، و پیش از هر چیز یک نقطهٔ بازیابی خودکار
-  از وضعیت نصب نوشته می‌شود، پس هر کاری قابل واگردانی است.
+  از وضعیت نصب نوشته می‌شود، پس هر کاری قابل واگردانی است. وقتی نامی که نصب
+  می‌شود فقط یک حرف با یک بستهٔ محبوب فاصله دارد، یا نسخهٔ سنجاق‌شده بازه‌ای را
+  می‌شکند که بسته‌ای از قبل اعلام کرده، تأییدیه همین را پیش از فشردن دکمه
+  می‌گوید — و خاموش‌کردن تأییدها این دو هشدار را ساکت نمی‌کند.
 * **وابستگی‌ها** سه پرسش را به همان ترتیبی که آدم‌ها می‌پرسند پاسخ می‌دهد. یک
   بسته را انتخاب کنید تا بگوید *چرا* نصب است — زنجیرهٔ نام بسته‌ها از بسته‌ای که
   خواسته‌اید تا این یکی، یا صریحاً اینکه هیچ‌چیز به آن نیاز ندارد — سپس نشان
   می‌دهد به چه چیزی نیاز دارد و چه چیزی به آن نیاز دارد، هر دو به‌صورت درخت، و
-  هر نیاز اعلام‌شده‌ای که نصب نیست را علامت می‌زند. پایین‌تر، بسته‌هایی را
+  هر نیاز اعلام‌شده‌ای که نصب نیست را علامت می‌زند. زیر درخت‌ها، بخش **تعارض‌های
+  نسخه** همان چیزی است که `pip check` می‌گوید، به زبان آدمیزاد: کدام بستهٔ
+  نصب‌شده کدام بازه را اعلام کرده و کدام نسخهٔ نصب آن را برآورده نمی‌کند — و
+  حالت برآورده هم گفته می‌شود، تا بخشِ خالی هرگز «هرگز بررسی نشده» خوانده نشود.
+  پایین‌تر، بسته‌هایی را
   فهرست می‌کند که هیچ‌چیز به آن‌ها نیاز ندارد و شما هم با نام نخواسته‌اید، و
   پیش از حذف **پیش‌نمایش** می‌دهد.
 * **امنیت** بسته‌های نصب‌شده را با پایگاه دادهٔ آسیب‌پذیری‌های
@@ -646,6 +684,9 @@ src/pypackhub/
     metadata.py        # فرادادهٔ dist-info نصب‌شده و دادهٔ وابستگی
     deps.py            # گراف وابستگی‌ها و پاک‌سازی ساخته‌شده روی آن
     sizes.py           # مصرف دیسک بسته‌های نصب‌شده
+    disk_usage.py      # تحلیل کل محیط: مجموع، بزرگ‌ترین مصرف‌کننده‌ها، اندازهٔ حافظه‌های پنهانی
+    trust.py           # تشخیص شبیه‌سازی نام بر پایهٔ فهرست همراه، نشانه‌های اعتماد
+    exporter.py        # برون‌بری requirements.txt، خط‌به‌خط اعتبارسنجی‌شده
     pypi.py            # نسخه‌ها، فراداده، حافظهٔ موقت
     search.py          # چه چیزی نگاه کنیم: رتبه‌بندی فهرست همراه + حل روی نمایه
     security.py        # بررسی آسیب‌پذیری برابر OSV.dev (فقط نام==نسخه)
@@ -664,9 +705,6 @@ src/pypackhub/
 
 tests/           # تست‌های واحد، به‌علاوهٔ tests/security برای تضمین‌های امنیتی
 ```
-
-`trust.py` (شبیه‌سازی نام و نشانه‌های زنجیرهٔ تأمین) برنامه‌ریزی شده اما هنوز
-نوشته نشده، پس عمداً از درخت بالا حذف شده تا آن‌گونه که وجود دارد فهرست نشود.
 
 سه قاعده طراحی را کنار هم نگه می‌دارد و هرکدام با یک تست اعمال می‌شود، نه با
 نظم شخصی:

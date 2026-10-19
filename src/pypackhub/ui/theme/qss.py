@@ -152,7 +152,7 @@ def _sidebar(tokens: DesignTokens, *, rtl: bool) -> str:
     font-size: {TITLE_FONT_SIZE_PX}px;
     font-weight: 700;
     color: {tokens.text_primary};
-    padding: 18px 16px 6px 16px;
+    padding: 12px 16px 6px 16px;
 }}
 
 #sidebarSubtitle {{
@@ -165,7 +165,7 @@ def _sidebar(tokens: DesignTokens, *, rtl: bool) -> str:
     border: none;
     border-radius: {tokens.radius_m};
     color: {tokens.text_secondary};
-    padding: 9px 14px;
+    padding: 7px 14px;
     text-align: {label_alignment};
 }}
 

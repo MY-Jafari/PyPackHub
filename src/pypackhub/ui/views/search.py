@@ -34,6 +34,14 @@ from PySide6.QtWidgets import (
 from pypackhub.core.backends.base import ActionKind, PackageAction
 from pypackhub.core.pypi import PyPIClient
 from pypackhub.core.search import SearchService
+from pypackhub.core.trust import (
+    ReleaseFacts,
+    TrustFlags,
+    TyposquatWarning,
+    bundled_catalog,
+    evaluate_trust,
+    typosquat_check,
+)
 from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
@@ -75,6 +83,8 @@ class SearchView(QWidget):
     search_finished = Signal(object)
     search_result = Signal(object)
     meta_loaded = Signal(str, object)
+    #: The release facts and the typosquat answer for one selection.
+    trust_loaded = Signal(str, object, object)
 
     def __init__(
         self,
@@ -94,6 +104,12 @@ class SearchView(QWidget):
         self._meta_task = ""
         self._selected: Any = None
         self._summary = ""
+        #: The trust panel's answers for the selected package: release facts
+        #: from the index, the evaluated flags, and the typosquat warning if
+        #: the name is one letter from a popular package.
+        self._trust_facts: ReleaseFacts | None = None
+        self._trust_flags: TrustFlags | None = None
+        self._trust_warning: TyposquatWarning | None = None
 
         self.setObjectName("searchPanel")
 
@@ -148,6 +164,12 @@ class SearchView(QWidget):
         self.detail_label.setObjectName("sectionHeading")
         layout.addWidget(self.detail_label)
 
+        self.trust_label = QLabel(self)
+        self.trust_label.setObjectName("mutedText")
+        self.trust_label.setWordWrap(True)
+        self.trust_label.setVisible(False)
+        layout.addWidget(self.trust_label)
+
         detail_row = QHBoxLayout()
         detail_row.setSpacing(8)
 
@@ -166,6 +188,7 @@ class SearchView(QWidget):
         self.search_finished.connect(self._on_search_finished)
         self.search_result.connect(self._on_search_result)
         self.meta_loaded.connect(self._on_meta_loaded)
+        self.trust_loaded.connect(self._on_trust_loaded)
 
     # -- searching -----------------------------------------------------
 
@@ -253,33 +276,57 @@ class SearchView(QWidget):
         item = selected[0] if selected else None
         if not isinstance(item, SearchResultItem):
             self._selected = None
+            self._clear_trust()
             self._update_detail()
             return
 
         self._selected = item.result
+        # The trust panel belongs to the new selection, not to whatever the
+        # previous one fetched; it stays empty until the new answer lands.
+        self._clear_trust()
         self._update_detail()
         self._load_versions(str(self._selected.name))
 
     def _load_versions(self, name: str) -> None:
-        """Fetch the package's release history for the version picker."""
+        """Fetch the selected package's history and trust facts together.
+
+        One worker answers both questions a selection asks: which versions
+        exist (the picker), and what the index knows about the package's
+        releases plus whether the name is a near-miss (the trust panel).
+        The typosquat answer is computed on the worker too - not because it
+        is slow, but so the panel lands with one signal, all of it or
+        nothing.
+        """
         if self._meta_task:
             return
 
         client = self._client if self._client is not None else self._make_client()
 
         def work(_task_id: str, _progress: object, _cancel: threading.Event) -> object:
-            return client.meta(name)
+            return (
+                client.meta(name),
+                client.release_facts(name),
+                typosquat_check(name, bundled_catalog().names),
+            )
 
         def finished(_task_id: str, result: object) -> None:
-            # Worker thread: compute what the payload is, then hand it over
-            # with the guarded emit; the busy-flag belongs to the GUI thread.
+            # Worker thread: compute what the payloads are, then hand them
+            # over with the guarded emit; the busy-flag belongs to the GUI
+            # thread.
             payload = getattr(result, "payload", None)
-            error = getattr(result, "error", "")
-            emit_if_alive(
-                self.meta_loaded,
-                name,
-                payload if error == "" else type("Meta", (), {"versions": ()})(),
-            )
+            error = getattr(result, "error", "") or ""
+            if isinstance(payload, tuple) and len(payload) == 3 and not error:
+                meta, facts, warning = payload
+            else:
+                meta = (
+                    payload
+                    if isinstance(payload, object) and not error
+                    else type("Meta", (), {"versions": ()})()
+                )
+                facts = ReleaseFacts(name=name, error=error or "the lookup failed")
+                warning = None
+            emit_if_alive(self.meta_loaded, name, meta)
+            emit_if_alive(self.trust_loaded, name, facts, warning)
 
         self._meta_task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.SEARCH_LOADING),
@@ -309,6 +356,73 @@ class SearchView(QWidget):
         self.install_button.setEnabled(True)
         self._update_detail()
 
+    def _on_trust_loaded(self, name: str, facts: object, warning: object) -> None:
+        """Render the trust panel's answers for the selection that asked."""
+        if self._selected is None or str(self._selected.name) != name:
+            return
+
+        self._trust_facts = facts if isinstance(facts, ReleaseFacts) else None
+        self._trust_flags = (
+            evaluate_trust(self._trust_facts) if self._trust_facts is not None else None
+        )
+        self._trust_warning = warning if isinstance(warning, TyposquatWarning) else None
+        self._update_detail()
+
+    def _clear_trust(self) -> None:
+        self._trust_facts = None
+        self._trust_flags = None
+        self._trust_warning = None
+
+    def _trust_lines(self) -> str:
+        """The trust block for the selected package, in the language in force.
+
+        Facts first, flags after - what the index knows, then what it means.
+        A lookup that failed says so instead of showing an empty panel that
+        would read as "nothing suspicious".
+        """
+        facts = self._trust_facts
+        flags = self._trust_flags
+        if facts is None or flags is None:
+            return ""
+
+        shell = self._shell
+        lines: list[str] = [shell.text(TranslationKey.TRUST_TITLE)]
+
+        if not facts.known:
+            lines.append(shell.text(TranslationKey.TRUST_UNKNOWN, error=facts.error))
+        else:
+            latest_label = shell.text(TranslationKey.TRUST_LATEST_RELEASE)
+            lines.append(
+                "  \u00b7  ".join(
+                    (
+                        f"{shell.text(TranslationKey.TRUST_FIRST_RELEASE)}: {facts.first_release}",
+                        f"{shell.text(TranslationKey.TRUST_RELEASES)}: {facts.releases}",
+                        f"{latest_label}: {facts.latest_release}",
+                    )
+                )
+            )
+            if flags.brand_new:
+                lines.append(shell.text(TranslationKey.TRUST_FLAG_BRAND_NEW))
+            if flags.abandoned:
+                lines.append(shell.text(TranslationKey.TRUST_FLAG_ABANDONED))
+            if flags.sdist_only:
+                lines.append(shell.text(TranslationKey.TRUST_FLAG_SDIST_ONLY))
+            if flags.no_homepage:
+                lines.append(shell.text(TranslationKey.TRUST_FLAG_NO_HOMEPAGE))
+            if flags.is_clean:
+                lines.append(shell.text(TranslationKey.TRUST_CLEAN))
+
+        if self._trust_warning is not None:
+            lines.append(
+                shell.text(
+                    TranslationKey.CONFIRM_TYPOSQUAT_REASON,
+                    name=self._trust_warning.name,
+                    popular=self._trust_warning.suspect_of,
+                )
+            )
+
+        return "\n".join(lines)
+
     def _install_selected(self) -> None:
         """Emit the validated install action for the picked version."""
         if self._selected is None:
@@ -329,6 +443,8 @@ class SearchView(QWidget):
     def _update_detail(self) -> None:
         if self._selected is None:
             self.detail_label.setText("")
+            self.trust_label.setText("")
+            self.trust_label.setVisible(False)
             self.install_button.setEnabled(False)
             return
 
@@ -338,6 +454,10 @@ class SearchView(QWidget):
         self.detail_label.setText(title)
         self.detail_label.setToolTip(self._summary)
         self.install_button.setEnabled(bool(self.version_combo.count()))
+
+        trust = self._trust_lines()
+        self.trust_label.setText(trust)
+        self.trust_label.setVisible(bool(trust))
 
     # -- chrome --------------------------------------------------------
 
@@ -354,6 +474,11 @@ class SearchView(QWidget):
             self.detail_label.setText("")
         else:
             self.detail_label.setText(str(self._selected.name))
+        # The trust block is rebuilt so a language change does not leave a
+        # panel answering in the previous language.
+        trust = self._trust_lines()
+        self.trust_label.setText(trust)
+        self.trust_label.setVisible(bool(trust) and self._selected is not None)
 
     def refresh(self) -> None:
         """Kept for navigation symmetry; a search page keeps its results."""

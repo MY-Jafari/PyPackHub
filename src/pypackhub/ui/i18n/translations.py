@@ -396,6 +396,47 @@ class TranslationKey(str, Enum):
     SAFETY_NOTICE = "safety.notice"
     SAFETY_SYSTEM_PYTHON = "safety.system_python"
 
+    PACKAGES_EXPORT = "packages.export"
+    PACKAGES_IMPORT = "packages.import"
+    PACKAGES_EXPORT_SHORT = "packages.export_short"
+    PACKAGES_IMPORT_SHORT = "packages.import_short"
+    PACKAGES_EXPORT_WRITTEN = "packages.export_written"
+    PACKAGES_EXPORT_FAILED = "packages.export_failed"
+    PACKAGES_IMPORT_FAILED = "packages.import_failed"
+    PACKAGES_IMPORT_EMPTY = "packages.import_empty"
+    IMPORT_TITLE = "import.title"
+    IMPORT_FILE = "import.file"
+    IMPORT_SELECT = "import.select"
+    IMPORT_LINE_COUNT = "import.line_count"
+    IMPORT_CONFIRM = "import.confirm"
+    IMPORT_NOTHING_SELECTED = "import.nothing_selected"
+    TRUST_TITLE = "trust.title"
+    TRUST_FIRST_RELEASE = "trust.first_release"
+    TRUST_RELEASES = "trust.releases"
+    TRUST_LATEST_RELEASE = "trust.latest_release"
+    TRUST_UNKNOWN = "trust.unknown"
+    TRUST_FLAG_BRAND_NEW = "trust.flag_brand_new"
+    TRUST_FLAG_ABANDONED = "trust.flag_abandoned"
+    TRUST_FLAG_SDIST_ONLY = "trust.flag_sdist_only"
+    TRUST_FLAG_NO_HOMEPAGE = "trust.flag_no_homepage"
+    TRUST_CLEAN = "trust.clean"
+    CONFIRM_TYPOSQUAT_TITLE = "confirm.typosquat.title"
+    CONFIRM_TYPOSQUAT_REASON = "confirm.typosquat.reason"
+    CONFIRM_CONFLICT_TITLE = "confirm.conflict.title"
+    CONFLICT_LINE = "conflict.line"
+    DEPS_CONFLICTS = "deps.conflicts"
+    DEPS_CONFLICTS_NONE = "deps.conflicts.none"
+    DASHBOARD_DISK_USAGE = "dashboard.disk_usage"
+    DISK_TITLE = "disk.title"
+    DISK_TOTAL = "disk.total"
+    DISK_FILES = "disk.files"
+    DISK_INCOMPLETE = "disk.incomplete"
+    DISK_LARGEST = "disk.largest"
+    DISK_CACHES = "disk.caches"
+    DISK_CACHE_MISSING = "disk.cache_missing"
+    DISK_ANALYSING = "disk.analysing"
+    DISK_FAILED = "disk.failed"
+
 
 #: Matches one ``%(name)s`` placeholder.
 PLACEHOLDER_PATTERN = re.compile(r"%\(([A-Za-z_][A-Za-z0-9_]*)\)s")
@@ -838,6 +879,57 @@ EN_TABLE: dict[str, str] = {
         "This environment is managed by the operating system. PyPackHub will not modify it; "
         "create a virtual environment instead."
     ),
+    TranslationKey.PACKAGES_EXPORT: "Export requirements\u2026",
+    TranslationKey.PACKAGES_IMPORT: "Import requirements\u2026",
+    TranslationKey.PACKAGES_EXPORT_SHORT: "Export",
+    TranslationKey.PACKAGES_IMPORT_SHORT: "Import",
+    TranslationKey.PACKAGES_EXPORT_WRITTEN: "Wrote %(path)s",
+    TranslationKey.PACKAGES_EXPORT_FAILED: "Could not write %(path)s: %(error)s",
+    TranslationKey.PACKAGES_IMPORT_FAILED: "Could not read %(path)s: %(error)s",
+    TranslationKey.PACKAGES_IMPORT_EMPTY: "No installable lines in %(path)s",
+    TranslationKey.IMPORT_TITLE: "Import requirements",
+    TranslationKey.IMPORT_FILE: "File",
+    TranslationKey.IMPORT_SELECT: (
+        "Choose the lines to install. Anything that needs a decision starts unchecked."
+    ),
+    TranslationKey.IMPORT_LINE_COUNT: "%(count)s of %(total)s lines selected",
+    TranslationKey.IMPORT_CONFIRM: "Install %(count)s packages",
+    TranslationKey.IMPORT_NOTHING_SELECTED: "Nothing is selected",
+    TranslationKey.TRUST_TITLE: "Trust",
+    TranslationKey.TRUST_FIRST_RELEASE: "First release",
+    TranslationKey.TRUST_RELEASES: "Releases",
+    TranslationKey.TRUST_LATEST_RELEASE: "Latest release",
+    TranslationKey.TRUST_UNKNOWN: "The index could not be asked: %(error)s",
+    TranslationKey.TRUST_FLAG_BRAND_NEW: "Brand new: first released less than two weeks ago.",
+    TranslationKey.TRUST_FLAG_ABANDONED: "Dormant: no release for over two years.",
+    TranslationKey.TRUST_FLAG_SDIST_ONLY: (
+        "Sdist only: its setup runs code the moment it is installed."
+    ),
+    TranslationKey.TRUST_FLAG_NO_HOMEPAGE: "No home page or repository declared.",
+    TranslationKey.TRUST_CLEAN: "No trust flags raised.",
+    TranslationKey.CONFIRM_TYPOSQUAT_TITLE: "Check the name",
+    TranslationKey.CONFIRM_TYPOSQUAT_REASON: (
+        "%(name)s is one letter away from %(popular)s, a common supply-chain trick. "
+        "Did you mean %(popular)s?"
+    ),
+    TranslationKey.CONFIRM_CONFLICT_TITLE: "Declared requirements this breaks",
+    TranslationKey.CONFLICT_LINE: (
+        "%(package)s requires %(requirement)s; %(version)s does not satisfy it."
+    ),
+    TranslationKey.DEPS_CONFLICTS: "Version conflicts",
+    TranslationKey.DEPS_CONFLICTS_NONE: "Every declared requirement is satisfied.",
+    TranslationKey.DASHBOARD_DISK_USAGE: "Analyse disk usage",
+    TranslationKey.DISK_TITLE: "Disk usage",
+    TranslationKey.DISK_TOTAL: "Environment total",
+    TranslationKey.DISK_FILES: "%(count)s files",
+    TranslationKey.DISK_INCOMPLETE: (
+        "Some parts could not be read, so the total is a floor, not a ceiling."
+    ),
+    TranslationKey.DISK_LARGEST: "Largest packages",
+    TranslationKey.DISK_CACHES: "Package-manager caches",
+    TranslationKey.DISK_CACHE_MISSING: "not created",
+    TranslationKey.DISK_ANALYSING: "Measuring\u2026",
+    TranslationKey.DISK_FAILED: "Could not measure: %(error)s",
 }
 
 FA_TABLE: dict[str, str] = {
@@ -1260,6 +1352,56 @@ FA_TABLE: dict[str, str] = {
         "این محیط توسط سیستم‌عامل مدیریت می‌شود. پای‌پک‌هاب آن را تغییر نمی‌دهد؛ "
         "در عوض یک محیط مجازی بسازید."
     ),
+    TranslationKey.PACKAGES_EXPORT: "برون‌بری فهرست نیازمندی‌ها\u2026",
+    TranslationKey.PACKAGES_IMPORT: "درون‌ریزی فهرست نیازمندی‌ها\u2026",
+    TranslationKey.PACKAGES_EXPORT_SHORT: "برون‌بری",
+    TranslationKey.PACKAGES_IMPORT_SHORT: "درون‌ریزی",
+    TranslationKey.PACKAGES_EXPORT_WRITTEN: "\u200f%(path)s نوشته شد.",
+    TranslationKey.PACKAGES_EXPORT_FAILED: "نوشتن \u200f%(path)s ممکن نشد: %(error)s",
+    TranslationKey.PACKAGES_IMPORT_FAILED: "خواندن \u200f%(path)s ممکن نشد: %(error)s",
+    TranslationKey.PACKAGES_IMPORT_EMPTY: "هیچ خط نصب‌شدنی‌ای در \u200f%(path)s نیست",
+    TranslationKey.IMPORT_TITLE: "درون‌ریزی فهرست نیازمندی‌ها",
+    TranslationKey.IMPORT_FILE: "پرونده",
+    TranslationKey.IMPORT_SELECT: (
+        "خط‌هایی را که باید نصب شوند انتخاب کنید؛ هر خطی که تصمیمی می‌خواهد از ابتدا بی‌انتخاب است."
+    ),
+    TranslationKey.IMPORT_LINE_COUNT: "%(count)s خط از %(total)s خط انتخاب شده",
+    TranslationKey.IMPORT_CONFIRM: "نصب %(count)s بسته",
+    TranslationKey.IMPORT_NOTHING_SELECTED: "چیزی انتخاب نشده است",
+    TranslationKey.TRUST_TITLE: "اعتماد",
+    TranslationKey.TRUST_FIRST_RELEASE: "نخستین انتشار",
+    TranslationKey.TRUST_RELEASES: "انتشارها",
+    TranslationKey.TRUST_LATEST_RELEASE: "آخرین انتشار",
+    TranslationKey.TRUST_UNKNOWN: "نمی‌توان از نمایه پرسید: %(error)s",
+    TranslationKey.TRUST_FLAG_BRAND_NEW: (
+        "تازه‌سراغ: نخستین انتشارش کمتر از دو هفته پیش بوده است."
+    ),
+    TranslationKey.TRUST_FLAG_ABANDONED: "خاموش: بیش از دو سال است انتشار نداشته است.",
+    TranslationKey.TRUST_FLAG_SDIST_ONLY: ("فقط sdist: متنِ نصبش همان لحظهٔ نصب کد اجرا می‌کند."),
+    TranslationKey.TRUST_FLAG_NO_HOMEPAGE: "هیچ صفحهٔ خانه یا مخزنی اعلام نشده است.",
+    TranslationKey.TRUST_CLEAN: "هیچ نشانهٔ اعتمادی گزارش نشد.",
+    TranslationKey.CONFIRM_TYPOSQUAT_TITLE: "نام را بررسی کنید",
+    TranslationKey.CONFIRM_TYPOSQUAT_REASON: (
+        "\u200f%(name)s فقط یک حرف با \u200f%(popular)s فاصله دارد؛ ترفندی رایج در "
+        "زنجیرهٔ تأمین. منظورتان \u200f%(popular)s بود؟"
+    ),
+    TranslationKey.CONFIRM_CONFLICT_TITLE: "نیازمندی‌های اعلام‌شده‌ای که می‌شکند",
+    TranslationKey.CONFLICT_LINE: (
+        "\u200f%(package)s به \u200f%(requirement)s نیاز دارد؛ "
+        "\u200f%(version)s آن را برآورده نمی‌کند."
+    ),
+    TranslationKey.DEPS_CONFLICTS: "تعارض‌های نسخه",
+    TranslationKey.DEPS_CONFLICTS_NONE: "همهٔ نیازمندی‌های اعلام‌شده برآورده‌اند.",
+    TranslationKey.DASHBOARD_DISK_USAGE: "تحلیل مصرف دیسک",
+    TranslationKey.DISK_TITLE: "مصرف دیسک",
+    TranslationKey.DISK_TOTAL: "کل محیط",
+    TranslationKey.DISK_FILES: "%(count)s پرونده",
+    TranslationKey.DISK_INCOMPLETE: ("بخش‌هایی خوانده نشد، پس این عدد کف است، نه سقف."),
+    TranslationKey.DISK_LARGEST: "بزرگ‌ترین بسته‌ها",
+    TranslationKey.DISK_CACHES: "حافظه‌های پنهانی مدیران بسته",
+    TranslationKey.DISK_CACHE_MISSING: "ساخته نشده",
+    TranslationKey.DISK_ANALYSING: "در حال اندازه‌گیری\u2026",
+    TranslationKey.DISK_FAILED: "اندازه‌گیری ممکن نشد: %(error)s",
 }
 
 

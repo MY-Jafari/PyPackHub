@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from pypackhub.core import metadata
-from pypackhub.core.deps import DependencyGraph, DependencyNode, build_graph
+from pypackhub.core.deps import (
+    DependencyGraph,
+    DependencyNode,
+    build_graph,
+    find_conflicts,
+    incoming_conflicts,
+)
 
 
 def _install(
@@ -228,3 +234,74 @@ def test_nodes_keep_the_installed_version_and_request_flag(graph: DependencyGrap
     assert node.version == "3.2.2"
     assert node.requested is True
     assert graph.get("left-over").requested is False  # type: ignore[union-attr]
+
+
+# -- conflict checks (the pip-check equivalent) -----------------------------------
+
+
+def test_a_broken_declared_range_is_a_conflict_with_its_evidence(tmp_path: Path) -> None:
+    """``app`` declares ``requests>=2.28`` and ``requests 2.0.0`` sits there:
+    exactly what ``pip check`` reports, and here it carries the names and the
+    version so the page can say it in a person's language."""
+    prefix = tmp_path / "broken"
+    _install(prefix, "app", "1.0", requires=("requests>=2.28",), requested=True)
+    _install(prefix, "requests", "2.0.0")
+
+    conflicts = find_conflicts(metadata.scan(prefix))
+
+    assert len(conflicts) == 1
+    assert conflicts[0].package == "app"
+    assert conflicts[0].target == "requests"
+    assert conflicts[0].requirement == "requests>=2.28"
+    assert conflicts[0].version == "2.0.0"
+
+
+def test_a_satisfied_environment_reports_no_conflicts(environment: Path) -> None:
+    assert find_conflicts(metadata.scan(environment)) == ()
+
+
+def test_a_missing_requirement_is_the_graphs_answer_not_a_conflict(tmp_path: Path) -> None:
+    """``pip check`` reports missing requirements too; this project reports
+    them as the graph's ``missing`` - reporting them twice, in two words,
+    would teach the user that neither list can be trusted."""
+    prefix = tmp_path / "incomplete"
+    _install(prefix, "app", "1.0", requires=("left-pad>=1.0",))
+
+    assert find_conflicts(metadata.scan(prefix)) == ()
+
+
+def test_an_unparsable_version_is_not_evidence_of_anything(tmp_path: Path) -> None:
+    """A distribution whose version string packaging refuses must not be
+    called broken: unparsable is not the same as unsatisfied."""
+    prefix = tmp_path / "odd"
+    _install(prefix, "app", "1.0", requires=("requests>=2.28",))
+    _install(prefix, "requests", "not-a-version")
+
+    assert find_conflicts(metadata.scan(prefix)) == ()
+
+
+def test_an_incoming_downgrade_conflicts_with_what_declares_it(environment: Path) -> None:
+    """The confirm-path question: httpie declared ``requests>=2.28``, so
+    pinning requests 2.0.0 is a break the user can still choose not to make."""
+    conflicts = incoming_conflicts(metadata.scan(environment), "requests", "2.0.0")
+
+    assert len(conflicts) == 1
+    assert conflicts[0].package == "httpie"
+    assert conflicts[0].version == "2.0.0"  # the version about to be installed
+
+
+def test_an_incoming_version_that_satisfies_everything_declares_nothing(
+    environment: Path,
+) -> None:
+    assert incoming_conflicts(metadata.scan(environment), "requests", "2.32.0") == ()
+
+
+def test_an_unversioned_declaration_constrains_nothing(environment: Path) -> None:
+    """``Requires-Dist: requests`` with no range accepts any version; the
+    check must not invent a constraint the metadata never stated."""
+    prefix = environment.parent / "loose"
+    _install(prefix, "app", "1.0", requires=("requests",), requested=True)
+    _install(prefix, "requests", "2.31.0")
+
+    assert find_conflicts(metadata.scan(prefix)) == ()
+    assert incoming_conflicts(metadata.scan(prefix), "requests", "0.1") == ()

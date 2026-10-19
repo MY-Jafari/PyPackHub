@@ -120,14 +120,14 @@ ordered so each section stands on the one before it:
 | Section | Contents | Gate |
 | --- | --- | --- |
 | 6 | ✅ Dependency graph: `core/deps.py` (transitive requires and reverse deps, cycles, why-installed chains, orphan detection from the installer's `REQUESTED` markers, removal preview) and the Dependencies view with the preview-removal flow | Graph unit tests plus an offscreen smoke test of the view |
-| 7 | PyPI browsing: the Search view (a package index search, release history) and import/export of requirements files | Mocked index plus an offscreen smoke test |
-| 8 | Trust and supply chain: `trust.py` typosquatting against the bundled popular-package list, the trust panel, and conflict/constraint checks before an install | The Phase 1 typosquatting cases (`reqeusts`, `numpyy`, `pandsa`) warn |
-| 9 | Disk-usage analysis: per-package and per-environment usage, the largest consumers, and cache inspection | Unit tests over a synthetic environment |
+| 7 | ✅ PyPI browsing: the Search view (a package index search, release history) and import/export of requirements files | Mocked index plus an offscreen smoke test |
+| 8 | ✅ Trust and supply chain: `trust.py` typosquatting against the bundled popular-package list, the trust panel, and conflict/constraint checks before an install | The Phase 1 typosquatting cases (`reqeusts`, `numpyy`, `pandsa`) warn |
+| 9 | ✅ Disk-usage analysis: per-package and per-environment usage, the largest consumers, and cache inspection | Unit tests over a synthetic environment |
 | 10 | Dashboard: the landing view, with environment and package summaries drawn from sections 2-9 | Offscreen smoke test |
 
 ## Notes on section 3
 
-**The theme switch is one call, not a widget walk.** `WindowShell.apply_to()`
+**The theme switch is one call, not a widget walk.**`WindowShell.apply_to()`
 hands the whole generated stylesheet to the `QApplication`, and Qt re-resolves it
 for every widget. That is what makes the switch live without a single widget
 knowing a theme exists, and it is why the tokens are data rather than QSS
@@ -312,3 +312,66 @@ second scan while one is running, so switching back and forth does not queue wor
 Reading is a worker-thread job like every other long pass, and the result arrives
 as a signal - including for a *cyclic* environment, which renders as a finite tree
 with one marked edge instead of hanging the UI thread.
+
+## Notes on sections 7-9
+
+**Typosquatting is one edit away, not "similar".** A check that flags every
+name resembling a popular one flags half the index and teaches nobody
+anything, so the bar is exact: Damerau-Levenshtein distance at most one
+against the bundled catalogue (which makes a swapped, missing or doubled
+letter one edit each - the three shapes real typos take), plus ASCII
+homoglyph folding on both sides so ``1nstall`` reads as ``install`` and a
+folded-exact match (``request5`` for ``requests``) warns hardest of all.
+Names shorter than five characters are never the answer to a near-miss, an
+exact catalogue name is the package itself rather than a warning, and pip
+and uv are never translated so matching their English output is stable.
+
+**The trust panel reports facts, never a verdict.** First release date,
+release count, latest release date, wheel-versus-sdist and homepage all come
+from one index request, and the flags (brand-new, dormant, sdist-only, no
+home page) are computed from those facts - each dated fact that cannot be
+parsed is simply not claimed. A lookup that failed renders as *unknown*,
+deliberately distinct from *clean*, because "the index could not be asked"
+shown as "nothing suspicious" is how a panel teaches a user to ignore it.
+
+**The supply-chain warnings ride the confirmation, and turning
+confirmations off does not silence them.** The confirmations-off setting is
+a convenience about ordinary actions; a name one letter from a popular
+package, or a pinned version that breaks a range an installed package
+declares, is information the user has no other channel for, so either
+warning forces the dialog open. The refusal is never the point - both are
+advisory, and the button beside them still works.
+
+**Import ratifies; it does not re-decide.** The requirements parser already
+classified every line of an untrusted file, so the preview starts from
+those decisions: plain packages checked, review-flagged lines unchecked
+with their reasons as tooltips, refused lines locked. Installer option
+lines (``-r``, ``--index-url``, ``--trusted-host``) are shown but inert -
+this flow installs specs and cannot honour an option, and a checkbox that
+changes nothing is a lie. What the user ratifies leaves as one install
+action, one command, one confirmation. The row-to-line mapping goes through
+the rows the list actually shows, not the parsed file's indices: a comment
+anywhere above a package used to shift every selection onto the wrong line,
+which is the bug the dialog's tests pin.
+
+**Conflict checks keep "missing" apart from "unsatisfied".** The graph
+already reports a declared-but-not-installed requirement as *missing*;
+calling the same thing a conflict would show one problem twice in two
+words. ``find_conflicts`` answers only the other half - declared range,
+installed version, unsatisfied - with the evidence (who declared what,
+which version) travelling to the dialog so each language can sentence it
+its own way. An unparsable version is never evidence of anything, and a
+requirement with no range constrains nothing. Before a pinned install or a
+downgrade the same arithmetic runs against the *incoming* version, which is
+the "impact warnings before any change" the spec asks for.
+
+**Disk usage is measured, not estimated, and inspection is all it does.**
+The environment total walks the whole prefix (interpreter, metadata,
+everything a package dropped outside its own ``RECORD``), the largest
+consumers reuse the per-package measurements, and pip's and uv's caches are
+located the way each tool documents - environment variables honoured, no
+subprocess spawned to ask. Unreadable parts lower the total and are
+remembered, so the number renders as a floor when it is one. Nothing on the
+page deletes anything: clearing a cache is a change to the machine and
+belongs behind a confirmation like every other change.
+

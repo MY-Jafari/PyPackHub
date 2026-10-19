@@ -29,7 +29,7 @@ from pypackhub.core.security import ScanReport, Vulnerability
 from pypackhub.core.snapshots import SnapshotStore
 from pypackhub.core.tasks import TaskManager
 from pypackhub.ui.formatting import format_bytes
-from pypackhub.ui.i18n.translations import TranslationKey
+from pypackhub.ui.i18n.translations import EN_TABLE, TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.dashboard import DashboardView
 from pypackhub.ui.views.history import HistoryEntryItem, HistoryView
@@ -65,6 +65,26 @@ class FakeSearchIndex:
             versions = tuple(answer.get("versions", ()))
 
         return _Meta()
+
+    def release_facts(self, package: str) -> object:
+        """Release facts from the same canned answer the meta lookup uses.
+
+        The trust panel is part of the selection flow now, so a fake index
+        without this answer cannot load a selection at all.
+        """
+        from pypackhub.core.pypi import ReleaseFacts
+
+        answer = self._answers.get(package, {})
+        if not answer:
+            return ReleaseFacts(name=package, error="offline")
+        return ReleaseFacts(
+            name=package,
+            first_release=str(answer.get("first_release", "2015-01-02")),
+            releases=int(answer.get("releases", 3)),
+            latest_release=str(answer.get("latest_release", "2026-09-01")),
+            latest_has_wheel=bool(answer.get("has_wheel", True)),
+            homepage=str(answer.get("homepage", "https://example.com/pkg")),
+        )
 
 
 class FakeSearchService:
@@ -189,6 +209,84 @@ def test_search_fills_results_and_installs_the_pinned_choice(
     assert installed[0].kind is ActionKind.INSTALL
     assert installed[0].specs == ("flask==3.1.3",)
     assert installed[0].environment == PREFIX
+
+
+def test_the_selection_answers_with_its_trust_facts(
+    qtbot, qapp: QApplication, context: UiContext, shell: WindowShell
+) -> None:
+    """Selecting a result also says what the index knows about its releases.
+
+    A typosquatted query is the case the trust panel exists for: the name
+    one letter away is looked up (an exact name must work even when it is
+    not popular), and the panel answers with both the release facts and the
+    "did you mean" warning before anything can be installed.
+    """
+    del qapp
+    service = FakeSearchService([_fake_result("reqeusts", "9.9.9", "not the one you meant")])
+    client = FakeSearchIndex(
+        {
+            "reqeusts": {
+                "latest": "9.9.9",
+                "summary": "not the one you meant",
+                "versions": ("9.9.9",),
+                "first_release": "2015-01-02",
+                "releases": 3,
+                "latest_release": "2026-09-01",
+                "has_wheel": True,
+                "homepage": "https://example.com/pkg",
+            }
+        }
+    )
+    view = SearchView(context=context, shell=shell, search_service=service, client=client)  # type: ignore[arg-type]
+
+    view.query_edit.setText("reqeusts")
+    view.search()
+    qtbot.waitUntil(lambda: view.results_list.count() == 1, timeout=5000)
+
+    view.results_list.setCurrentRow(0)
+    qtbot.waitUntil(lambda: not view._meta_task, timeout=5000)
+    qtbot.waitUntil(lambda: not view.trust_label.isHidden(), timeout=5000)
+
+    trust = view.trust_label.text()
+    assert EN_TABLE[TranslationKey.TRUST_TITLE] in trust
+    assert "2015-01-02" in trust
+    assert "requests" in trust  # the did-you-mean warning names the real package
+    assert EN_TABLE[TranslationKey.TRUST_CLEAN] in trust
+
+
+def test_an_unreachable_index_says_unknown_rather_than_nothing(
+    qtbot, qapp: QApplication, context: UiContext, shell: WindowShell
+) -> None:
+    """A failed lookup must read as "could not tell", not as "all fine"."""
+    del qapp
+    service = FakeSearchService([_fake_result("flask", "3.1.3", "micro framework")])
+
+    class OfflineIndex:
+        def meta(self, package: str) -> object:
+            class _Meta:
+                info = None
+                versions = ()
+
+            return _Meta()
+
+        def release_facts(self, package: str) -> object:
+            from pypackhub.core.pypi import ReleaseFacts
+
+            return ReleaseFacts(name=package, error="offline")
+
+    view = SearchView(context=context, shell=shell, search_service=service, client=OfflineIndex())  # type: ignore[arg-type]
+
+    view.query_edit.setText("flask")
+    view.search()
+    qtbot.waitUntil(lambda: view.results_list.count() == 1, timeout=5000)
+
+    view.results_list.setCurrentRow(0)
+    qtbot.waitUntil(lambda: not view._meta_task, timeout=5000)
+    qtbot.waitUntil(lambda: not view.trust_label.isHidden(), timeout=5000)
+
+    assert EN_TABLE[TranslationKey.TRUST_UNKNOWN].replace("%(error)s", "offline") in (
+        view.trust_label.text()
+    )
 
 
 def test_the_unpinned_choice_installs_by_name(
@@ -444,3 +542,58 @@ def test_the_dashboard_without_data_shows_placeholders_not_lies(
     assert values[TranslationKey.DASHBOARD_OUTDATED_PACKAGES].text() == "—"
     assert values[TranslationKey.DASHBOARD_VULNERABLE].text() == "—"
     assert values[TranslationKey.DASHBOARD_PURPOSE].text() == "General purpose"
+
+
+def test_the_dashboard_measures_disk_usage_off_the_gui_thread(
+    qtbot, qapp: QApplication, context: UiContext, shell: WindowShell, monkeypatch, tmp_path: Path
+) -> None:
+    """The button walks the prefix on a worker; the dialog opens with facts.
+
+    The walk covers the whole environment and both package-manager caches,
+    so it is exactly the kind of pass that must never run on the GUI thread
+    - and the button re-enables once the answer has been shown.
+    """
+    del qapp
+    from pypackhub.core.disk_usage import CacheUsage, EnvironmentUsage
+    from pypackhub.core.sizes import PackageSize
+    from pypackhub.ui.views import dashboard as dashboard_module
+
+    view = DashboardView(context=context, shell=shell)
+
+    usage = EnvironmentUsage(
+        environment=tmp_path,
+        total_bytes=12_345,
+        files=7,
+        complete=True,
+        packages=(
+            PackageSize(
+                name="big",
+                location=tmp_path / "big",
+                files_count=2,
+                size_bytes=900,
+                top_paths=(),
+                exact=True,
+            ),
+        ),
+        caches=(
+            CacheUsage(kind="pip", path=tmp_path / "pip", size_bytes=4096, exists=True),
+            CacheUsage(kind="uv", path=tmp_path / "uv", size_bytes=0, exists=False),
+        ),
+    )
+    recorded: dict[str, object] = {}
+
+    class MeasuredDialog:
+        def __init__(self, *, usage, translator, parent=None) -> None:
+            recorded["usage"] = usage
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(dashboard_module, "DiskUsageDialog", MeasuredDialog)
+    monkeypatch.setattr(dashboard_module, "analyse_disk_usage", lambda prefix: usage)
+
+    view.disk_button.click()
+    qtbot.waitUntil(lambda: "usage" in recorded, timeout=5000)
+
+    assert recorded["usage"] is usage
+    assert view.disk_button.isEnabled()

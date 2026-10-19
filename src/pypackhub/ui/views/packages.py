@@ -27,11 +27,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from packaging.requirements import InvalidRequirement, Requirement
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -45,14 +47,16 @@ from PySide6.QtWidgets import (
 )
 
 from pypackhub.core.backends.base import ActionKind, BackendError, CommandPlan, PackageAction
+from pypackhub.core.deps import RequirementConflict
 from pypackhub.core.environments import create_environment
+from pypackhub.core.exporter import export_requirements
 from pypackhub.core.inventory import Inventory, InventoryService, PackageRow, action_target_names
 from pypackhub.core.metadata import InstalledMetadataIndex, normalize_name
 from pypackhub.core.platform_guard import ModificationPolicy, Severity
 from pypackhub.core.runner import CommandResult, elevation_supported
 from pypackhub.core.snapshots import SnapshotDiff, SnapshotStore, restore_specs
 from pypackhub.core.tasks import JobState, TaskResult
-from pypackhub.core.validation import ValidationError
+from pypackhub.core.validation import ValidationError, parse_requirements
 from pypackhub.ui.formatting import format_bytes
 from pypackhub.ui.i18n.reasons import reason_text
 from pypackhub.ui.i18n.translations import TranslationKey
@@ -65,13 +69,16 @@ from pypackhub.ui.widgets.dialogs import (
     BlockedDialog,
     BootstrapNotice,
     ConfirmationDialog,
+    ConflictNotice,
     CreateEnvironmentDialog,
     CreateEnvironmentRequest,
     DowngradeDialog,
     ElevationNotice,
     FallbackNotice,
+    ImportPreviewDialog,
     InstallDialog,
     RollbackPreviewDialog,
+    TyposquatNotice,
 )
 from pypackhub.ui.widgets.log_panel import LogPanel, RunOutcome
 from pypackhub.ui.widgets.package_table import (
@@ -169,13 +176,19 @@ class PackagesView(QWidget):
         header.addStretch(1)
         layout.addLayout(header)
 
+        # The toolbar is two rows on purpose. One row held everything -
+        # search, two switches, a spinner and eight buttons - which made
+        # its minimum width 1700+ pixels: wider than the window at every
+        # size the window allows, so the layout squeezed and clipped text
+        # off half the buttons. Row one finds and moves data; row two is
+        # the changing actions, left-aligned so they read as one group.
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
         self.search_edit = QLineEdit(self)
         self.search_edit.setObjectName("searchInput")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setMinimumWidth(220)
+        self.search_edit.setMinimumWidth(180)
         toolbar.addWidget(self.search_edit)
 
         # Both switches start in the state the settings page stores for them, so
@@ -206,31 +219,46 @@ class PackagesView(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         toolbar.addWidget(self.refresh_button)
 
+        self.export_button = QPushButton(self)
+        self.export_button.clicked.connect(self._export_requested)
+        toolbar.addWidget(self.export_button)
+
+        self.import_button = QPushButton(self)
+        self.import_button.clicked.connect(self._import_requested)
+        toolbar.addWidget(self.import_button)
+        layout.addLayout(toolbar)
+
+        # The changing actions: one row of their own, so each button is as
+        # wide as its text needs and the row fits the window's stated
+        # minimum with room to spare.
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+
         self.install_button = QPushButton(self)
         self.install_button.setObjectName("primaryButton")
         self.install_button.clicked.connect(self.install_requested)
-        toolbar.addWidget(self.install_button)
+        actions.addWidget(self.install_button)
 
         self.upgrade_button = QPushButton(self)
         self.upgrade_button.clicked.connect(lambda: self._change_selected(ActionKind.UPGRADE))
-        toolbar.addWidget(self.upgrade_button)
+        actions.addWidget(self.upgrade_button)
 
         self.downgrade_button = QPushButton(self)
         self.downgrade_button.clicked.connect(self.downgrade_requested)
-        toolbar.addWidget(self.downgrade_button)
+        actions.addWidget(self.downgrade_button)
 
         self.uninstall_button = QPushButton(self)
         self.uninstall_button.setObjectName("dangerButton")
         self.uninstall_button.clicked.connect(lambda: self._change_selected(ActionKind.UNINSTALL))
-        toolbar.addWidget(self.uninstall_button)
+        actions.addWidget(self.uninstall_button)
 
         self.upgrade_all_button = QPushButton(self)
         self.upgrade_all_button.clicked.connect(
             lambda: self._change_selected(ActionKind.UPGRADE_ALL)
         )
-        toolbar.addWidget(self.upgrade_all_button)
-
-        layout.addLayout(toolbar)
+        actions.addWidget(self.upgrade_all_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
 
         # A package-manager run reports lines, never a percentage a GUI could
         # trust, so this is deliberately the animated kind of progress bar:
@@ -714,6 +742,145 @@ class PackagesView(QWidget):
             ToastKind.INFO if cancelled else ToastKind.ERROR,
         )
 
+    def _export_requested(self) -> None:
+        """Write the installed state to a requirements file the user picks.
+
+        Every line is validated on the way out the same way an imported line
+        is validated on the way in, so the file cannot contain anything the
+        importer would refuse. A failure to write is reported, never silent.
+        """
+        if self._inventory is None or not self._inventory.rows:
+            self.toast.emit(self._shell.text(TranslationKey.LOG_EMPTY), ToastKind.INFO)
+            return
+
+        target, _selected = QFileDialog.getSaveFileName(
+            self,
+            self._shell.text(TranslationKey.PACKAGES_EXPORT),
+            "requirements.txt",
+            "Requirements (*.txt);;All files (*)",
+        )
+        if not target:
+            return
+
+        text = export_requirements(
+            (row.name, row.installed) for row in self._inventory.rows if row.name and row.installed
+        )
+        try:
+            Path(target).write_text(text, encoding="utf-8")
+        except OSError as error:
+            message = self._shell.text(
+                TranslationKey.PACKAGES_EXPORT_FAILED, path=target, error=str(error)
+            )
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return
+
+        message = self._shell.text(TranslationKey.PACKAGES_EXPORT_WRITTEN, path=target)
+        self.status_changed.emit(message)
+        self.toast.emit(message, ToastKind.SUCCESS)
+
+    def _import_requested(self) -> None:
+        """Read a requirements file, review it with the user, install the choice.
+
+        The file is untrusted input (SPEC 11.2): every line was classified by
+        the requirements parser before anything here runs, and the preview
+        is where each of those decisions is ratified or undone - including
+        the lines the parser refused, which cannot be selected at all. What
+        survives goes to the one confirm-and-run path as a single batch.
+        """
+        source, _selected = QFileDialog.getOpenFileName(
+            self,
+            self._shell.text(TranslationKey.PACKAGES_IMPORT),
+            "",
+            "Requirements (*.txt);;All files (*)",
+        )
+        if not source:
+            return
+
+        try:
+            text = Path(source).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            message = self._shell.text(
+                TranslationKey.PACKAGES_IMPORT_FAILED, path=source, error=str(error)
+            )
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return
+
+        parsed = parse_requirements(text, source=source)
+        if not parsed.packages and not parsed.review:
+            message = self._shell.text(TranslationKey.PACKAGES_IMPORT_EMPTY, path=source)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.INFO)
+            return
+
+        dialog = ImportPreviewDialog(parsed=parsed, translator=self._shell.translator, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        specs = dialog.selected_specs()
+        if not specs:
+            return
+
+        self.confirm_and_run(self.service.action_for_import(specs))
+
+    def _typosquat_notice_for(self, action: PackageAction) -> TyposquatNotice | None:
+        """The near-miss warning for a name this action would newly install.
+
+        Only installs are checked: an upgrade touches a name that was chosen
+        and installed already, and warning about it would teach the user to
+        click through warnings. The first near-miss in the action is the
+        one shown - one dialog carrying five identical warnings is a dialog
+        nobody reads.
+        """
+        if action.kind is not ActionKind.INSTALL:
+            return None
+
+        for spec in action.specs:
+            try:
+                name = Requirement(spec).name
+            except InvalidRequirement:
+                continue
+            warning = self.service.typosquat_check(name)
+            if warning is not None:
+                return TyposquatNotice(warning=warning)
+        return None
+
+    def _conflict_notice_for(self, action: PackageAction) -> ConflictNotice | None:
+        """What this action's pinned versions break, per declared ranges.
+
+        Only an action that states the version it will install can be
+        checked: an unpinned install lets the resolver choose, and claiming
+        it breaks something would be a guess. A downgrade states its version
+        in the action itself; an install states one when the spec is pinned.
+        """
+        checked: dict[tuple[str, str], None] = {}
+
+        if action.kind is ActionKind.DOWNGRADE:
+            for name in action.names:
+                checked[(name, action.version)] = None
+        elif action.kind is ActionKind.INSTALL:
+            for spec in action.specs:
+                try:
+                    requirement = Requirement(spec)
+                except InvalidRequirement:
+                    continue
+                pinned = ""
+                for clause in requirement.specifier:
+                    if clause.operator in ("==", "==="):
+                        pinned = clause.version
+                        break
+                if pinned:
+                    checked[(requirement.name, pinned)] = None
+
+        entries: list[RequirementConflict] = []
+        for (name, version), _nothing in checked.items():
+            entries.extend(self.service.declared_conflicts(name, version))
+
+        if not entries:
+            return None
+        return ConflictNotice(entries=tuple(entries))
+
     def confirm_and_run(self, action: PackageAction) -> bool:
         """The one path that changes an environment.
 
@@ -810,8 +977,13 @@ class PackagesView(QWidget):
 
         # ``or needs_elevation``: elevation is confirmed even when the policy
         # alone would not ask, because a run with the OS's help must never be
-        # consented to silently (SPEC section 11.5).
-        if policy.requires_confirmation or needs_elevation:
+        # consented to silently (SPEC section 11.5). A supply-chain warning or
+        # a declared-range conflict forces the dialog for the same reason:
+        # turning confirmations off is a convenience, not a licence to run
+        # an install whose one line of caution nobody saw.
+        typosquat = self._typosquat_notice_for(action)
+        conflicts = self._conflict_notice_for(action)
+        if policy.requires_confirmation or needs_elevation or typosquat or conflicts:
             dialog = ConfirmationDialog(
                 plan=plan,
                 policy=policy,
@@ -819,6 +991,8 @@ class PackagesView(QWidget):
                 elevation=(
                     ElevationNotice(backend=service.backend_name) if needs_elevation else None
                 ),
+                typosquat=typosquat,
+                conflicts=conflicts,
                 parent=self,
             )
             if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
@@ -886,6 +1060,8 @@ class PackagesView(QWidget):
                 backend=missing,
                 commands=tuple(step.display_command() for step in bootstrap),
             ),
+            typosquat=self._typosquat_notice_for(action),
+            conflicts=self._conflict_notice_for(action),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
@@ -931,6 +1107,8 @@ class PackagesView(QWidget):
             policy=policy,
             translator=self._shell.translator,
             fallback=FallbackNotice(replaced=self.service.backend_name),
+            typosquat=self._typosquat_notice_for(action),
+            conflicts=self._conflict_notice_for(action),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
@@ -1381,6 +1559,12 @@ class PackagesView(QWidget):
         self.outdated_check.setText(shell.text(TranslationKey.PACKAGES_ONLY_OUTDATED))
         self.sizes_check.setText(shell.text(TranslationKey.PACKAGES_SHOW_SIZES))
         self.refresh_button.setText(shell.text(TranslationKey.PACKAGES_REFRESH))
+        # Short labels because the row is crowded; the full sentence is the
+        # tooltip, so nothing is lost - only moved out of the button face.
+        self.export_button.setText(shell.text(TranslationKey.PACKAGES_EXPORT_SHORT))
+        self.export_button.setToolTip(shell.text(TranslationKey.PACKAGES_EXPORT))
+        self.import_button.setText(shell.text(TranslationKey.PACKAGES_IMPORT_SHORT))
+        self.import_button.setToolTip(shell.text(TranslationKey.PACKAGES_IMPORT))
         self.install_button.setText(shell.text(TranslationKey.PACKAGES_INSTALL))
         self.upgrade_button.setText(shell.text(TranslationKey.PACKAGES_UPGRADE))
         self.downgrade_button.setText(shell.text(TranslationKey.PACKAGES_DOWNGRADE))

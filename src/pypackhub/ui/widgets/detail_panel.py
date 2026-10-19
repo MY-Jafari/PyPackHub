@@ -140,10 +140,6 @@ class DetailPanel(QWidget):
         body.addStretch(1)
 
         self._link_buttons: list[QPushButton] = []
-        self.edit_label = QLabel(self._scroll_body)
-        self.target_label = QLabel(self._scroll_body)
-        self.python_label = QLabel(self._scroll_body)
-        self._outdated_label = QLabel(self._scroll_body)
 
         self.clear()
         self.retranslate(translator)

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from pypackhub.core import metadata
 from pypackhub.core.backends.base import ActionKind
-from pypackhub.core.deps import build_graph
+from pypackhub.core.deps import build_graph, find_conflicts
 from pypackhub.core.settings import Language
 from pypackhub.ui.app import build_window
 from pypackhub.ui.i18n.translations import EN_TABLE, FA_TABLE, TranslationKey
@@ -324,3 +324,52 @@ def test_the_window_owns_the_page_and_routes_removals_to_the_packages_view(
 
     assert recorded == [action]
     window.close()
+
+
+# -- the conflict scan ---------------------------------------------------------
+
+
+def test_a_broken_declared_range_is_listed_in_plain_language(
+    qapp: QApplication, shell: WindowShell, prefix: Path
+) -> None:
+    """The pip-check equivalent, as a sentence: who, what range, which version."""
+    del qapp
+    _install(prefix, "broken-app", "1.0", requires=("requests>=2.32",), requested=True)
+    index = metadata.scan(prefix)
+    page = DependenciesView(context=UiContext(default_environment=prefix), shell=shell)
+    page.show_graph(build_graph(index), conflicts=find_conflicts(index))
+
+    assert page.conflicts_list.count() == 1
+    text = page.conflicts_list.item(0).text()
+    assert "broken-app" in text
+    assert "requests>=2.32" in text
+    assert "2.31.0" in text
+
+
+def test_a_satisfied_environment_says_so_plainly(view: DependenciesView) -> None:
+    view.show_graph(view._graph, conflicts=())  # type: ignore[arg-type]
+
+    assert view.conflicts_list.isHidden()
+    assert view.conflicts_note.text() == EN_TABLE[TranslationKey.DEPS_CONFLICTS_NONE]
+
+
+def test_conflicts_survive_a_language_change(view: DependenciesView, shell: WindowShell) -> None:
+    """The lines are sentences, so switching language rebuilds them."""
+    from pypackhub.core.deps import RequirementConflict
+
+    conflicts = (
+        RequirementConflict(
+            package="httpie",
+            requirement="requests>=2.32",
+            target="requests",
+            version="2.31.0",
+        ),
+    )
+    view.show_graph(view._graph, conflicts=conflicts)  # type: ignore[arg-type]
+    assert "httpie" in view.conflicts_list.item(0).text()
+
+    shell.apply_settings(view._shell.settings.__class__(language=Language.FA))
+    view.retranslate()
+
+    assert view.conflicts_list.count() == 1
+    assert "\u200fhttpie" in view.conflicts_list.item(0).text()
