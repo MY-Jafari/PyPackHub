@@ -39,6 +39,7 @@ from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.spinner import Spinner, SpinnerSize
 from pypackhub.ui.widgets.toast import ToastKind
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["SearchView"]
 
@@ -171,8 +172,22 @@ class SearchView(QWidget):
     @property
     def service(self) -> SearchService:
         if self._service is None:
-            self._service = SearchService(client=PyPIClient())
+            self._service = SearchService(client=self._make_client())
         return self._service
+
+    def _make_client(self) -> PyPIClient:
+        """A client pointed at the index the settings describe.
+
+        The settings page's index URL was validated before it was stored;
+        the search answers come from the same index the upgrades install
+        from, or the two halves of the app disagree about the world.
+        """
+        settings = self._shell.settings
+        return PyPIClient(
+            index_url=settings.pypi_index_url,
+            ttl=settings.pypi_cache_ttl,
+            max_versions=settings.pypi_cache_max_versions,
+        )
 
     def search(self) -> None:
         """Run the query on a worker thread, filling the list as answers land."""
@@ -193,12 +208,14 @@ class SearchView(QWidget):
         service = self.service
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> list[Any]:
-            return service.search(query, cancel=cancel, on_result=self.search_result.emit)
+            return service.search(
+                query, cancel=cancel, on_result=lambda row: emit_if_alive(self.search_result, row)
+            )
 
         self._task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.SEARCH_TITLE),
             work,
-            on_finish=lambda _task_id, result: self.search_finished.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.search_finished, result),
         )
 
     def _on_search_result(self, result: Any) -> None:
@@ -248,17 +265,20 @@ class SearchView(QWidget):
         if self._meta_task:
             return
 
-        client = self._client if self._client is not None else PyPIClient()
+        client = self._client if self._client is not None else self._make_client()
 
         def work(_task_id: str, _progress: object, _cancel: threading.Event) -> object:
             return client.meta(name)
 
         def finished(_task_id: str, result: object) -> None:
-            self._meta_task = ""
+            # Worker thread: compute what the payload is, then hand it over
+            # with the guarded emit; the busy-flag belongs to the GUI thread.
             payload = getattr(result, "payload", None)
             error = getattr(result, "error", "")
-            self.meta_loaded.emit(
-                name, payload if error == "" else type("Meta", (), {"versions": ()})()
+            emit_if_alive(
+                self.meta_loaded,
+                name,
+                payload if error == "" else type("Meta", (), {"versions": ()})(),
             )
 
         self._meta_task = self._context.tasks.schedule(
@@ -268,6 +288,7 @@ class SearchView(QWidget):
         )
 
     def _on_meta_loaded(self, name: str, meta: object) -> None:
+        self._meta_task = ""
         if self._selected is None or str(self._selected.name) != name:
             return
 

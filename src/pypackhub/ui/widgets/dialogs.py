@@ -81,6 +81,22 @@ class FallbackNotice:
     replaced: str
 
 
+@dataclass(frozen=True, slots=True)
+class BootstrapNotice:
+    """What a confirmation has to say when the chosen manager is missing.
+
+    The user's chosen package manager is not installed, so it has to be set up
+    before the action can run through it. *backend* names the tool that is
+    missing; *commands* are the exact commands that install it, shown above
+    the action's own command in the preview - the approval covers the whole
+    batch, one decision (SPEC section 11.7: the text shown is the data that
+    runs).
+    """
+
+    backend: str
+    commands: tuple[str, ...] = ()
+
+
 #: The dialog title for each action.
 _TITLE_KEYS: dict[ActionKind, TranslationKey] = {
     ActionKind.INSTALL: TranslationKey.CONFIRM_INSTALL_TITLE,
@@ -126,6 +142,7 @@ class ConfirmationDialog(QDialog):
         project_url: str = "",
         elevation: ElevationNotice | None = None,
         fallback: FallbackNotice | None = None,
+        bootstrap: BootstrapNotice | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -134,6 +151,7 @@ class ConfirmationDialog(QDialog):
         self._translator = translator
         self._elevation = elevation
         self._fallback = fallback
+        self._bootstrap = bootstrap
 
         self.setObjectName("confirmationDialog")
         self.setModal(True)
@@ -159,7 +177,7 @@ class ConfirmationDialog(QDialog):
         layout.addWidget(self.warning_label)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeading)
 
         self.environment_label = QLabel(str(plan.action.environment), self)
         self.environment_label.setObjectName("versionLabel")
@@ -181,8 +199,18 @@ class ConfirmationDialog(QDialog):
         self.command_view = QPlainTextEdit(self)
         self.command_view.setObjectName("commandPreview")
         self.command_view.setReadOnly(True)
-        self.command_view.setPlainText(plan.display_command())
-        self.command_view.setFixedHeight(72)
+        # With a bootstrap notice the preview carries the installing commands
+        # above the action's own one; the user approves the whole batch, so
+        # every line of it is shown.
+        commands = (
+            (*bootstrap.commands, plan.display_command())
+            if bootstrap is not None
+            else (plan.display_command(),)
+        )
+        self.command_view.setPlainText("\n".join(commands))
+        # Four commands' worth of height, then scroll: a long restore batch
+        # must not push the buttons off a small screen.
+        self.command_view.setFixedHeight(min(72 * len(commands), 288))
         layout.addWidget(self.command_view)
 
         self.policy_label = QLabel(self)
@@ -203,15 +231,27 @@ class ConfirmationDialog(QDialog):
         self.fallback_label.setWordWrap(True)
         self.fallback_label.setVisible(False)
         layout.addWidget(self.fallback_label)
+
+        self.bootstrap_label = QLabel(self)
+        self.bootstrap_label.setObjectName("policyNotice")
+        self.bootstrap_label.setWordWrap(True)
+        self.bootstrap_label.setVisible(False)
+        layout.addWidget(self.bootstrap_label)
         self._describe_elevation()
         self._describe_fallback()
+        self._describe_bootstrap()
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
         )
+        # The elevation button wins when both notices apply: promising an
+        # administrator run is the stronger consent, and both notices are
+        # shown regardless.
         if elevation is not None:
             confirm_key = TranslationKey.CONFIRM_ELEVATION_BUTTON
+        elif bootstrap is not None:
+            confirm_key = TranslationKey.CONFIRM_BOOTSTRAP_BUTTON
         elif fallback is not None:
             confirm_key = TranslationKey.CONFIRM_FALLBACK_BUTTON
         else:
@@ -262,6 +302,15 @@ class ConfirmationDialog(QDialog):
     def accepts_fallback(self) -> bool:
         """Whether the action button names the backend that had to be substituted."""
         return self._fallback is not None
+
+    @property
+    def bootstrap_text(self) -> str:
+        return self.bootstrap_label.text()
+
+    @property
+    def accepts_bootstrap(self) -> bool:
+        """Whether the action button names the tool the batch installs first."""
+        return self._bootstrap is not None
 
     def accept(self) -> None:
         self.confirmed = True
@@ -338,6 +387,32 @@ class ConfirmationDialog(QDialog):
 
         self.fallback_label.setText(text)
         self.fallback_label.setVisible(True)
+
+    def _describe_bootstrap(self) -> None:
+        """Say that the chosen manager is missing and will be installed first.
+
+        The user asked for a specific package manager, so substituting a
+        different one silently is not an option - the tool they chose is set
+        up first, then the action runs through it. The dialog explains that
+        before anything is approved, the preview above shows every command
+        the approval covers, and the action button names the tool it installs
+        (SPEC section 11.7 - the text shown is the data that runs).
+        """
+        if self._bootstrap is None:
+            return
+
+        translator = self._translator
+        text = "\n\n".join(
+            (
+                translator.translate(TranslationKey.CONFIRM_BOOTSTRAP_TITLE),
+                translator.translate(
+                    TranslationKey.CONFIRM_BOOTSTRAP_REASON, backend=self._bootstrap.backend
+                ),
+            )
+        )
+
+        self.bootstrap_label.setText(text)
+        self.bootstrap_label.setVisible(True)
 
 
 class BlockedDialog(QDialog):
@@ -724,7 +799,7 @@ class CreateEnvironmentDialog(QDialog):
         layout.addWidget(self.intro_label)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeading)
 
         self.location_edit = QLineEdit(self)
         self.location_edit.setText(default_location)
@@ -846,7 +921,7 @@ class InstallDialog(QDialog):
         layout.addWidget(title)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeading)
 
         self.spec_edit = QLineEdit(self)
         self.spec_edit.setPlaceholderText(
@@ -964,7 +1039,7 @@ class DowngradeDialog(QDialog):
         layout.addWidget(self.current_label)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeading)
         self.version_edit = QLineEdit(self)
         self.version_edit.textChanged.connect(self._clear_error)
         form.addRow(translator.translate(TranslationKey.DOWNGRADE_VERSION), self.version_edit)

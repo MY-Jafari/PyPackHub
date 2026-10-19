@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTableView,
@@ -55,12 +56,14 @@ from pypackhub.core.validation import ValidationError
 from pypackhub.ui.formatting import format_bytes
 from pypackhub.ui.i18n.reasons import reason_text
 from pypackhub.ui.i18n.translations import TranslationKey
+from pypackhub.ui.progress import RunProgressTracker
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.theme.design_tokens import DesignTokens
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.detail_panel import DetailPanel
 from pypackhub.ui.widgets.dialogs import (
     BlockedDialog,
+    BootstrapNotice,
     ConfirmationDialog,
     CreateEnvironmentDialog,
     CreateEnvironmentRequest,
@@ -92,6 +95,10 @@ class RefreshOutcome:
     inventory: Inventory | None = None
     index: InstalledMetadataIndex | None = None
     error: str = ""
+    #: The environment this pass listed, as a string. A pass that started for
+    #: one environment must never be applied to another the user switched to
+    #: while it ran, so the outcome carries its own identity.
+    environment: str = ""
 
 
 class PackagesView(QWidget):
@@ -225,6 +232,23 @@ class PackagesView(QWidget):
 
         layout.addLayout(toolbar)
 
+        # A package-manager run reports lines, never a percentage a GUI could
+        # trust, so this is deliberately the animated kind of progress bar:
+        # it says *what* is running and that it is still alive, while the
+        # streamed lines in the log carry the detail. Every changing action
+        # goes through the one run path below, so an upgrade - which with the
+        # log panel closed used to give no sign of life until its toast - is
+        # on screen from its first moment like a refresh is.
+        self._run_progress = QProgressBar(self)
+        self._run_progress.setObjectName("runProgress")
+        self._run_progress.setRange(0, 0)  # min == max: Qt's busy animation
+        self._run_progress.setTextVisible(True)
+        self._run_progress.setVisible(False)
+        #: Turns the run's output lines into overall progress; rebuilt by
+        #: :meth:`_show_run_progress` for every run.
+        self._run_progress_tracker = RunProgressTracker()
+        layout.addWidget(self._run_progress)
+
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
         table_container = QWidget(splitter)
@@ -295,7 +319,7 @@ class PackagesView(QWidget):
         self.refresh_finished.connect(self._on_refresh_finished)
         self.run_finished.connect(self._on_run_finished)
         self.create_finished.connect(self._on_create_finished)
-        self.run_line.connect(self._log.append_line)
+        self.run_line.connect(self._on_run_line)
 
     # -- state ---------------------------------------------------------
 
@@ -324,6 +348,15 @@ class PackagesView(QWidget):
         resolved = Path(prefix).resolve()
         if resolved == self._environment and self._inventory is not None:
             return
+
+        # A pass still running read the *old* environment; letting it finish
+        # would paint that environment's packages under the new one's name.
+        # It is cancelled rather than waited out, for the same reason a
+        # change finishing mid-refresh is (see ``_refresh_after_change``).
+        if self._refresh_task:
+            self._context.tasks.cancel(self._refresh_task)
+            self._refresh_task = ""
+            self._refresh_pending = False
 
         self._environment = resolved
         self._inventory = None
@@ -365,8 +398,14 @@ class PackagesView(QWidget):
         with_sizes = self.sizes_check.isChecked()
         self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_REFRESHING))
 
+        # Captured before the work starts: the pass belongs to the
+        # environment it was asked about, not to whatever the view points at
+        # when the worker gets there.
+        environment = self._environment
+        environment_key = str(environment)
+
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> RefreshOutcome:
-            service = self._context.service_for(self._environment)
+            service = self._context.service_for(environment)
             listed: Inventory | None = None
 
             def remember(inventory: Inventory) -> None:
@@ -388,12 +427,19 @@ class PackagesView(QWidget):
                 # The listing may already be on screen even when a later phase
                 # failed, so it is handed back with the error rather than thrown
                 # away: an index that is unreachable must not empty the table.
-                return RefreshOutcome(inventory=listed, error=str(error))
+                return RefreshOutcome(
+                    inventory=listed, error=str(error), environment=environment_key
+                )
 
             if cancel.is_set():
-                return RefreshOutcome(inventory=inventory, index=index, error="cancelled")
+                return RefreshOutcome(
+                    inventory=inventory,
+                    index=index,
+                    error="cancelled",
+                    environment=environment_key,
+                )
 
-            return RefreshOutcome(inventory=inventory, index=index)
+            return RefreshOutcome(inventory=inventory, index=index, environment=environment_key)
 
         self._refresh_task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.PACKAGES_REFRESHING),
@@ -408,6 +454,14 @@ class PackagesView(QWidget):
         self.refresh_button.setEnabled(False)
 
     def _on_refresh_finished(self, result: TaskResult) -> None:
+        # A pass that was cancelled - the user switched environments, or a
+        # change finished underneath it - still reports back. Its task id no
+        # longer matches the running one, and neither its outcome nor its
+        # bookkeeping belong to the view anymore: acknowledging either would
+        # clobber the pass that took its place.
+        if result.task_id != self._refresh_task:
+            return
+
         self._refresh_task = ""
         self._spinner.stop()
         self._spinner_container.setVisible(False)
@@ -431,6 +485,16 @@ class PackagesView(QWidget):
         if result.state is JobState.FAILED:
             self.status_changed.emit(result.error)
             self.toast.emit(result.error, ToastKind.ERROR)
+            return
+
+        # A pass that listed one environment must not repaint the view while
+        # it points at another: the user switched mid-pass, the new pass is
+        # already running, and this answer belongs to the old one.
+        if (
+            outcome is not None
+            and outcome.environment
+            and outcome.environment != str(self._environment)
+        ):
             return
 
         if outcome is None or outcome.inventory is None:
@@ -584,6 +648,10 @@ class PackagesView(QWidget):
         label = self._shell.text(TranslationKey.CREATE_ENV_TITLE)
         self._log.begin_run(label)
         self._log.append_line(self._shell.text(TranslationKey.CREATE_ENV_RUNNING))
+        # A venv creation prints nothing countable before it is done, so the
+        # bar for it is the animated one - a determinate bar would sit at
+        # zero for the whole run.
+        self._show_run_progress(label, determinate=False)
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> object:
             return create_environment(
@@ -603,6 +671,7 @@ class PackagesView(QWidget):
         from pypackhub.core.environments import CreateEnvironmentResult
 
         self._create_task = ""
+        self._hide_run_progress()
         created = result.payload if isinstance(result.payload, CreateEnvironmentResult) else None
 
         if created is None:
@@ -677,6 +746,16 @@ class PackagesView(QWidget):
                 self.create_environment_requested()
             return False
 
+        # A missing package manager is not a refusal: with the automatic
+        # choice nothing usable means "set pip up", and a manager the user
+        # forced in the settings means "set that one up". The action they
+        # asked for still happens, through the manager they chose - after the
+        # tool that was missing has been installed, with the whole batch
+        # shown as commands and confirmed as one decision.
+        missing = service.required_backend_missing()
+        if missing:
+            return self._confirm_bootstrap_and_run(action, policy, missing)
+
         try:
             # If the backend cannot honour the ``--user`` flag the user asked for,
             # drop it silently rather than surfacing a package-manager error the user
@@ -746,6 +825,77 @@ class PackagesView(QWidget):
                 return False
 
         self._run_plan(plan, elevated=needs_elevation, meta=self._record_action_context(plan))
+        return True
+
+    def _confirm_bootstrap_and_run(
+        self, action: PackageAction, policy: ModificationPolicy, missing: str
+    ) -> bool:
+        """Offer to install the missing manager, then run the action through it.
+
+        The commands that install the tool and the action's own command are
+        one decision: the confirmation shows every line of the batch (SPEC
+        section 11.7), and the plan queue runs them in that order - the
+        action's command only starts once the tool it needs exists. uv has
+        no ``--user`` path, so a request that asked for one drops the flag
+        here rather than planning a command uv would refuse.
+
+        The reachability rule applies before the batch is built, against the
+        *missing* manager's semantics: a uv that cannot change the package
+        the interpreter imports would "succeed" here exactly as it does when
+        it is installed, so the same pip fallback is offered.
+
+        An environment the current user cannot write is the elevation case
+        like any other: the whole batch runs with the OS's help, or - when
+        the OS cannot provide it - it is refused before anything is queued.
+        """
+        if missing != "pip" and action.user:
+            action = replace(action, user=False)
+
+        if missing != "pip" and not self.service.backend_can_reach_targets(
+            action, backend_name=missing
+        ):
+            return self._confirm_fallback_with_pip(action, policy)
+
+        needs_elevation = self.service.bootstrap_needs_elevation()
+        if needs_elevation and not elevation_supported():
+            message = self._shell.text(
+                TranslationKey.ELEVATION_UNAVAILABLE, backend=self.service.backend_name
+            )
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.INFO)
+            return False
+
+        try:
+            original = self.service.plan_assuming_backend(missing, action)
+            bootstrap = self.service.bootstrap_plans(missing, action=action)
+        except (BackendError, ValidationError) as error:
+            message = str(error)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return False
+
+        if not bootstrap:
+            return False
+
+        dialog = ConfirmationDialog(
+            plan=original,
+            policy=policy,
+            translator=self._shell.translator,
+            elevation=(ElevationNotice(backend=missing) if needs_elevation else None),
+            bootstrap=BootstrapNotice(
+                backend=missing,
+                commands=tuple(step.display_command() for step in bootstrap),
+            ),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
+            return False
+
+        # The batch installs a manager: whatever the service probed about the
+        # managers is now stale, and the next action must re-probe rather
+        # than trust a cached "missing".
+        self.service.invalidate_backend_state()
+        self.run_confirmed_plans([(step, needs_elevation) for step in (*bootstrap, original)])
         return True
 
     def _confirm_fallback_with_pip(self, action: PackageAction, policy: ModificationPolicy) -> bool:
@@ -822,6 +972,46 @@ class PackagesView(QWidget):
 
         return meta
 
+    def _show_run_progress(self, label: str, *, determinate: bool = True) -> None:
+        """Put the run's label on the bar and reveal it.
+
+        An installing or upgrading run starts at a real zero and fills with
+        the work its manager reports (see :meth:`_on_run_line`): 68% of the
+        run means 68% of the bar, never a spinner standing in for progress
+        nobody can see. A run whose tool prints nothing countable - a
+        virtual-environment creation - takes the animated bar instead,
+        because a determinate one would sit at zero insisting nothing was
+        happening while the tool worked in silence.
+        """
+        self._run_progress.setFormat(label)
+        if determinate:
+            self._run_progress_tracker = RunProgressTracker()
+            self._run_progress.setRange(0, 100)
+            self._run_progress.setValue(0)
+        else:
+            self._run_progress.setRange(0, 0)
+        self._run_progress.setVisible(True)
+
+    def _on_run_line(self, text: str) -> None:
+        """Show one output line in the log, and let it move the bar.
+
+        pip and uv report work as it happens - a line per package resolved,
+        per file fetched, the switch to the install phase, success - and the
+        tracker turns those real events into overall progress. The bar fills
+        with what the manager actually did, moves only when a line justifies
+        it, and never runs backward; a line that reports nothing leaves it
+        exactly where it was.
+        """
+        self._log.append_line(text)
+        if self._run_progress.isHidden():
+            return
+        percent = self._run_progress_tracker.observe(text)
+        if percent is not None:
+            self._run_progress.setValue(percent)
+
+    def _hide_run_progress(self) -> None:
+        self._run_progress.setVisible(False)
+
     def _run_plan(
         self,
         plan: CommandPlan,
@@ -850,6 +1040,7 @@ class PackagesView(QWidget):
         self._log.append_line(f"$ {plan.display_command()}")
         if elevated:
             self._log.append_line(self._shell.text(TranslationKey.ELEVATION_NO_OUTPUT))
+        self._show_run_progress(plan.label)
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> CommandResult:
             service = self._context.service_for(self._environment)
@@ -1037,6 +1228,9 @@ class PackagesView(QWidget):
 
     def _on_run_finished(self, result: TaskResult) -> None:
         self._run_task = ""
+        # The next queued plan - if there is one - re-shows the bar with its
+        # own label in the same event-loop turn, so there is no flicker.
+        self._hide_run_progress()
         command_result = result.payload if isinstance(result.payload, CommandResult) else None
 
         outcome = _outcome_for(result, command_result)
@@ -1092,9 +1286,14 @@ class PackagesView(QWidget):
             if self._inventory is None or not self._inventory.outdated_count:
                 self.toast.emit(self._shell.text(TranslationKey.LOG_EMPTY), ToastKind.INFO)
                 return
-            self.confirm_and_run(
-                self.service.action_for_upgrade_all(self._inventory, user=self._may_use_user_flag())
-            )
+            try:
+                action = self.service.action_for_upgrade_all(
+                    self._inventory, user=self._may_use_user_flag()
+                )
+            except ValidationError as error:
+                self._report_validation(error)
+                return
+            self.confirm_and_run(action)
             return
 
         if len(rows) != 1:
@@ -1103,10 +1302,18 @@ class PackagesView(QWidget):
 
         row = rows[0]
         user = self._may_use_user_flag()
-        if kind is ActionKind.UNINSTALL:
-            action = self.service.action_for_uninstall(row.name)
-        else:
-            action = self.service.action_for_upgrade(row.name, user=user)
+
+        # The install and downgrade paths already guard this; the builders
+        # re-validate names, and one installed row the validator refuses must
+        # be reported, not raise out of the click handler.
+        try:
+            if kind is ActionKind.UNINSTALL:
+                action = self.service.action_for_uninstall(row.name)
+            else:
+                action = self.service.action_for_upgrade(row.name, user=user)
+        except ValidationError as error:
+            self._report_validation(error)
+            return
         self.confirm_and_run(action)
 
     def _may_use_user_flag(self) -> bool:
@@ -1227,7 +1434,13 @@ class PackagesView(QWidget):
         the table here is what makes a refresh feel immediate - the packages are
         on screen while the index lookups catch up, instead of an empty table
         behind a spinner until the slowest of them answers.
+
+        A listing that arrives for an environment the view no longer points at
+        is dropped: the user switched mid-pass, and the pass for the new
+        environment is the one that should paint it.
         """
+        if inventory.environment != self._environment:
+            return
         self._inventory = inventory
         self.model.set_inventory(inventory)
         self._update_summary()

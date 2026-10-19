@@ -370,7 +370,8 @@ class SettingsView(QWidget):
         if self._loading:
             return
         settings = self.current_settings()
-        old_package_manager = self._shell.settings.package_manager
+        old_settings = self._shell.settings
+        old_package_manager = old_settings.package_manager
         self._shell.apply_settings(settings)
         # Changing the package manager must reach the services the views share.
         # The window hands this page its context for exactly that: the shell is
@@ -379,6 +380,29 @@ class SettingsView(QWidget):
         # a manager here used to do nothing until the next launch.
         if settings.package_manager != old_package_manager and self._context is not None:
             self._context.set_package_manager(settings.package_manager)
+        # The index settings reach the services the same way, and only when
+        # they actually changed: rebuilding them on every save would throw
+        # away the version cache because a checkbox moved.
+        if self._context is not None and (
+            settings.pypi_index_url,
+            settings.extra_index_urls,
+            settings.trusted_hosts,
+            settings.pypi_cache_ttl,
+            settings.pypi_cache_max_versions,
+        ) != (
+            old_settings.pypi_index_url,
+            old_settings.extra_index_urls,
+            old_settings.trusted_hosts,
+            old_settings.pypi_cache_ttl,
+            old_settings.pypi_cache_max_versions,
+        ):
+            self._context.set_index(
+                index_url=settings.pypi_index_url,
+                extra_index_urls=tuple(settings.extra_index_urls),
+                trusted_hosts=tuple(settings.trusted_hosts),
+                cache_ttl=settings.pypi_cache_ttl,
+                cache_max_versions=settings.pypi_cache_max_versions,
+            )
         # The shell re-translates and re-themes the window, which reads the
         # controls back in the new language, so this write does not fight it.
         self._shell.save()

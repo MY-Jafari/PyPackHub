@@ -107,7 +107,7 @@ class ToastHost(QWidget):
         self._layout.setContentsMargins(0, 0, 16, 16)
         self._layout.setSpacing(8)
         self._layout.addStretch(1)
-        self._layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        self._layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignTrailing)
 
         self._messages: list[_Toast] = []
         self._tokens: DesignTokens | None = None

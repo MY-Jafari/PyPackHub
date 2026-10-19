@@ -8,6 +8,7 @@ to re-parse a command line.
 
 from __future__ import annotations
 
+import threading
 import time
 
 from pypackhub.core.runner import CommandResult
@@ -24,14 +25,25 @@ def _result_payload() -> CommandResult:
     )
 
 
+def _schedule_and_wait(manager: TaskManager, work, *, meta: dict | None = None) -> None:
+    """Run *work* and return only once it is in the history.
+
+    ``schedule`` starts a thread; reading the history immediately after is a
+    race the thread usually wins only because it does almost nothing. The
+    failed-task path does more (the traceback is logged), which is how the
+    race was found - so every reader in this file waits for the finish
+    callback instead of hoping.
+    """
+    done = threading.Event()
+    manager.schedule("a task", work, meta=meta, on_finish=lambda _id, _result: done.set())
+    assert done.wait(timeout=5.0)
+
+
 def test_a_finished_task_records_its_moment() -> None:
     manager = TaskManager()
     before = time.time()
 
-    finished: list[object] = []
-    manager.schedule(
-        "a task", lambda *_args: _result_payload(), on_finish=lambda _id, r: finished.append(r)
-    )
+    _schedule_and_wait(manager, lambda *_args: _result_payload())
 
     result = manager.history()[0]
 
@@ -44,16 +56,12 @@ def test_the_callers_context_is_recorded_untouched() -> None:
     manager = TaskManager()
     meta = {"kind": "uninstall", "names": ["left-pad"], "snapshot": "2026-01-01T00-00-00-000"}
 
-    manager.schedule(
-        "pip uninstall",
-        lambda *_args: _result_payload(),
-        meta=meta,
-        on_finish=lambda _id, _r: None,
-    )
+    _schedule_and_wait(manager, lambda *_args: _result_payload(), meta=meta)
 
-    assert manager.history()[0].meta == meta
+    recorded = manager.history()[0]
+    assert recorded.meta == meta
     # And the recorded meta is a copy: later edits stay out of the history.
-    assert manager.history()[0].meta is not meta
+    assert recorded.meta is not meta
 
 
 def test_a_failed_task_is_in_the_history_with_its_error() -> None:
@@ -62,7 +70,7 @@ def test_a_failed_task_is_in_the_history_with_its_error() -> None:
     def boom(*_args: object) -> object:
         raise RuntimeError("the index is unreachable")
 
-    manager.schedule("a failing task", boom, on_finish=lambda _id, _r: None)
+    _schedule_and_wait(manager, boom)
 
     result = manager.history()[0]
     assert result.state is JobState.FAILED

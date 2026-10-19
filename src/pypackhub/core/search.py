@@ -19,6 +19,7 @@ is testable without a network.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from pypackhub.core.pypi import PyPIClient
+
+_LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "Catalog",
@@ -223,7 +226,11 @@ class SearchService:
                     # finding under two scanners; both are suppressed here.
                     try:
                         result = future.result()
-                    except Exception:  # noqa: S112  # nosec B112
+                    except Exception:  # nosec B112
+                        # Defensive only, but silent failure is worse than
+                        # none: a pool-level bug would otherwise show up as
+                        # rows that simply never arrive.
+                        _LOGGER.warning("search result future failed", exc_info=True)
                         continue
                     outcomes[result.name] = result
                     if on_result is not None:

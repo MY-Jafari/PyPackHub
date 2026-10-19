@@ -13,6 +13,8 @@ the right uv and read the right project metadata when that matters.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from pathlib import Path
 
 from pypackhub.core.backends.base import (
@@ -29,20 +31,44 @@ from pypackhub.core.backends.base import (
 from pypackhub.core.platform_guard import InterpreterFacts
 from pypackhub.core.runner import CommandFailedError, ExecutableNotFoundError, run
 
-__all__ = ["UvBackend", "find_uv"]
+__all__ = ["UvBackend", "find_uv", "uv_path_in_prefix"]
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def find_uv() -> Path:
-    """Return the uv executable this backend would run, or raise."""
+def find_uv(prefix: Path | None = None) -> Path:
+    """Return the uv executable this backend would run, or raise.
+
+    A uv installed *into the environment* - the outcome of the bootstrap flow
+    that ``python -m pip install uv`` offers when uv is missing - is checked
+    first, exactly like pip's own lookup: a tool that belongs to the
+    environment beats whatever happens to be on the inherited search path.
+    """
     from pypackhub.core.runner import resolve_executable
+
+    if prefix is not None:
+        for candidate in (prefix / "bin" / "uv", prefix / "Scripts" / "uv.exe"):
+            if candidate.is_file():
+                return candidate
 
     try:
         return Path(resolve_executable("uv"))
     except ExecutableNotFoundError:
         _LOGGER.debug("uv is not resolvable as an executable")
         raise UnsupportedBackendError("uv could not be found") from None
+
+
+def uv_path_in_prefix(prefix: Path) -> Path:
+    """Where a uv installed *into* this environment lives, before it exists.
+
+    The bootstrap flow plans the chosen manager's command before that manager
+    is installed; this is the path the installing command is about to fill,
+    so the plan's first word is a real location rather than a bare name the
+    hardened runner would refuse to resolve.
+    """
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    return prefix / scripts / f"uv{suffix}"
 
 
 class UvBackend(Backend):
@@ -77,8 +103,16 @@ class UvBackend(Backend):
         return "uv"
 
     def executable_path(self) -> Path:
+        if self._executable is not None:
+            return self._executable
+        # A bound interpreter implies its prefix: a uv that was installed
+        # into this environment (the bootstrap flow's doing) is found even
+        # when the environment is not on the search path.
+        prefix = None
+        if self._python is not None:
+            prefix = self._python.parent.parent
         try:
-            return find_uv() if self._executable is None else self._executable
+            return find_uv(prefix)
         except UnsupportedBackendError as error:
             raise UnsupportedBackendError("uv is not available on this system") from error
 
@@ -160,6 +194,7 @@ class UvBackend(Backend):
         environment: Path,
         *,
         facts: InterpreterFacts | None = None,
+        cancel: threading.Event | None = None,
     ) -> PackageListing:
         """List installed packages for one environment using ``uv pip list --format json``."""
         executable = self._executable or self.executable_path()
@@ -169,6 +204,7 @@ class UvBackend(Backend):
             result = run(
                 [str(executable), "pip", "list", "--format", "json", *target],
                 timeout=120.0,
+                cancel=cancel,
             )
         except CommandFailedError as error:
             return PackageListing(

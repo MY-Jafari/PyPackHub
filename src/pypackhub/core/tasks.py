@@ -12,6 +12,7 @@ by the CLI companion and the test suite.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -30,6 +31,8 @@ __all__ = [
     "TaskProgress",
     "TaskResult",
 ]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class JobState(str, Enum):
@@ -68,6 +71,9 @@ class TaskResult:
     #: When the task finished (``time.time()``). Zero until then, which is how
     #: a caller can tell "not finished" from "finished long ago".
     timestamp: float = 0.0
+    #: The id of the task this result belongs to, so a history entry can be
+    #: correlated back to the task that produced it.
+    task_id: str = ""
     #: Caller-supplied context for the history: what the task was about, beyond
     #: its label. The packages view fills this in for changing actions - the
     #: action kind, the names it touched, the snapshot taken before it - so
@@ -125,8 +131,11 @@ class TaskManager:
         ``meta`` is recorded on the result untouched, for the caller's own
         history - the task manager never reads it.
         """
-        task_id = f"task-{self._next_id}"
-        self._next_id += 1
+        # The id is minted under the lock: two threads scheduling at once
+        # would otherwise race the counter and hand out the same id.
+        with self._lock:
+            task_id = f"task-{self._next_id}"
+            self._next_id += 1
 
         cancel = threading.Event()
         state: JobState = JobState.PENDING
@@ -147,6 +156,7 @@ class TaskManager:
                     payload=payload,
                     timestamp=time.time(),
                     meta=recorded_meta,
+                    task_id=task_id,
                 )
             except TaskCancelled:
                 state = JobState.CANCELLED
@@ -156,8 +166,14 @@ class TaskManager:
                     error="cancelled",
                     timestamp=time.time(),
                     meta=recorded_meta,
+                    task_id=task_id,
                 )
             except Exception as error:
+                # The failure is recorded for the UI either way, but a
+                # programming bug (a TypeError in a work closure) is
+                # indistinguishable from an expected failure unless the
+                # traceback is logged here.
+                _LOGGER.exception("task %s failed", task_id)
                 state = JobState.FAILED
                 result = TaskResult(
                     state=state,
@@ -165,10 +181,16 @@ class TaskManager:
                     error=str(error),
                     timestamp=time.time(),
                     meta=recorded_meta,
+                    task_id=task_id,
                 )
 
             with self._lock:
                 self._append_history(result)
+                # A finished task has no cancel event left to set and no
+                # thread left to join; keeping either would grow one entry
+                # per task for the process lifetime.
+                self._cancel.pop(task_id, None)
+                self._tasks.pop(task_id, None)
 
             if on_finish is not None:
                 on_finish(task_id, result)
@@ -180,12 +202,18 @@ class TaskManager:
         )
 
         with self._lock:
-            self._cancel[task_id] = cancel
-            self._tasks[task_id] = thread
+            # The id is minted under the same lock that registers the task:
+            # two threads scheduling at once would otherwise race the
+            # counter and hand out the same id.
+            self._register(task_id, cancel, thread)
 
         thread.start()
 
         return task_id
+
+    def _register(self, task_id: str, cancel: threading.Event, thread: threading.Thread) -> None:
+        self._cancel[task_id] = cancel
+        self._tasks[task_id] = thread
 
     # ------------------------------------------------------------------
     # Cancellation and state
@@ -216,6 +244,23 @@ class TaskManager:
                 cancelled += 1
 
         return cancelled
+
+    def shutdown(self, timeout: float = 3.0) -> None:
+        """Ask every running task to stop, then wait for the workers to exit.
+
+        Called when the window closes: the worker threads are daemon threads,
+        so without this a ``pip install`` in flight would be orphaned mid-run -
+        the child process would keep going with no timeout and no supervision
+        left to watch it. *timeout* bounds the wait so a wedged task cannot
+        keep the window open indefinitely.
+        """
+        self.cancel_all()
+        with self._lock:
+            threads = list(self._tasks.values())
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def state(self, task_id: str) -> JobState | None:
         """Best-effort current state. The authoritative source is the finish callback."""
@@ -279,8 +324,9 @@ class TaskManager:
             self._history = self._history[-self._history_limit :]
 
     def _last_history_for(self, task_id: str) -> TaskResult | None:
-        for entry in reversed(self._history):
-            if getattr(entry.payload, "argv", None) is not None:
-                continue
-            return entry
+        """The recorded result of one task, matched on the id it carried."""
+        with self._lock:
+            for entry in reversed(self._history):
+                if entry.task_id == task_id and getattr(entry.payload, "argv", None) is None:
+                    return entry
         return None

@@ -36,6 +36,7 @@ from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.spinner import Spinner, SpinnerSize
 from pypackhub.ui.widgets.toast import ToastKind
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["SnapshotItem", "SnapshotView"]
 
@@ -161,7 +162,7 @@ class SnapshotView(QWidget):
         self._context.tasks.schedule(
             self._shell.text(TranslationKey.SNAPSHOTS_REFRESH),
             work,
-            on_finish=lambda _task_id, result: self.listed.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.listed, result),
         )
 
     def _on_listed(self, result: Any) -> None:
@@ -223,10 +224,10 @@ class SnapshotView(QWidget):
             )
 
         def finished(_task_id: str, result: object) -> None:
-            self._task = ""
-            self.spinner.stop()
-            self.spinner.hide()
-            self.created.emit(result)
+            # The callback runs on the worker thread: the only thing allowed
+            # here is the guarded emit - spinner and state belong to the GUI
+            # thread, which resets them in the slot below.
+            emit_if_alive(self.created, result)
 
         self._task = context.tasks.schedule(
             self._shell.text(TranslationKey.SNAPSHOTS_CREATE),
@@ -235,6 +236,9 @@ class SnapshotView(QWidget):
         )
 
     def _on_created(self, result: Any) -> None:
+        self._task = ""
+        self.spinner.stop()
+        self.spinner.hide()
         snapshot = result.payload if isinstance(result.payload, Snapshot) else None
         if snapshot is None:
             error = getattr(result, "error", "") or self._shell.text(TranslationKey.SNAPSHOTS_ERROR)

@@ -13,6 +13,7 @@ run the right pip without guessing from the search path.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 from pypackhub.core.backends.base import (
@@ -191,10 +192,11 @@ class PipBackend(Backend):
         environment: Path,
         *,
         facts: InterpreterFacts | None = None,
+        cancel: threading.Event | None = None,
     ) -> PackageListing:
         """List installed packages for one environment using ``pip list --format=json``."""
         try:
-            result = run(self._command("list", "--format=json"), timeout=120.0)
+            result = run(self._command("list", "--format=json"), timeout=120.0, cancel=cancel)
         except CommandFailedError as error:
             return PackageListing(
                 environment=environment,

@@ -131,7 +131,16 @@ def _sidebar(tokens: DesignTokens, *, rtl: bool) -> str:
     # The divider sits between the sidebar and the content, so it follows the
     # layout direction rather than the screen.
     divider_side = "left" if rtl else "right"
-    label_alignment = "right" if rtl else "left"
+    # text-align is a *logical* value: Qt resolves "left" as AlignLeading,
+    # which mirrors to the physical right under a right-to-left layout
+    # direction - the reading edge, exactly where nav labels belong. Saying
+    # "right" for Persian - the obvious-looking compensation - mirrors
+    # twice and pins the text to the physical *left* of each button, which
+    # is precisely the bug this rule used to carry: the sidebar moved to
+    # the right and its labels stayed on the far left. The value therefore
+    # stays "left" in both directions and lets Qt do the mirroring; the
+    # border above is a physical edge and keeps its per-direction flip.
+    label_alignment = "left"
 
     return f"""\
 #sidebar {{

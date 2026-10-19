@@ -23,12 +23,13 @@ navigation entries never have to change.
 from __future__ import annotations
 
 import base64
+import threading
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -66,6 +67,7 @@ from pypackhub.ui.views.snapshots import SnapshotView
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.log_panel import LogPanel
 from pypackhub.ui.widgets.toast import ToastHost, ToastKind
+from pypackhub.ui.worker_signals import emit_if_alive
 
 if TYPE_CHECKING:
     pass
@@ -220,6 +222,11 @@ class PlaceholderView(QWidget):
 class MainWindow(QMainWindow):
     """The application window."""
 
+    #: The environments a discovery worker found, handed over from that
+    #: thread; Qt queues it onto the GUI thread because this window lives
+    #: there.
+    environments_loaded = Signal(object)
+
     def __init__(
         self,
         *,
@@ -234,6 +241,8 @@ class MainWindow(QMainWindow):
         self._nav_buttons: dict[ViewName, QPushButton] = {}
         self._current_view = ViewName.DASHBOARD
         self._environments_loaded = False
+        self._environments_task: str = ""
+        self.environments_loaded.connect(self._on_environments_loaded)
 
         self.setObjectName("mainWindow")
         self.setMinimumSize(960, 600)
@@ -653,7 +662,36 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.load_environments)
 
     def load_environments(self) -> None:
-        environments = self._context.environments()
+        """Discover environments on a worker thread and fill the switcher.
+
+        The scan walks the same roots the environments page does, and on a
+        slow or networked home it takes seconds; running it in showEvent's
+        timer used to freeze the window the moment it appeared. The combo
+        keeps whatever it has until the answer lands - on first show that is
+        the placeholder row, which is what it showed before, only honestly.
+        """
+        if self._environments_task:
+            return
+
+        context = self._context
+
+        def work(_task_id: str, _progress: object, _cancel: threading.Event) -> object:
+            return tuple(context.environments())
+
+        self._environments_task = context.tasks.schedule(
+            self._shell.text(TranslationKey.NAV_ENVIRONMENTS),
+            work,
+            on_finish=lambda _task_id, result: emit_if_alive(self.environments_loaded, result),
+        )
+
+    def _on_environments_loaded(self, result: object) -> None:
+        """Populate the switcher with the prefixes the worker discovered."""
+        self._environments_task = ""
+        environments = getattr(result, "payload", None)
+        if not isinstance(environments, tuple):
+            # Discovery failed; whatever the combo already has stays.
+            return
+
         self._environment_switcher.blockSignals(True)
         self._environment_switcher.clear()
         for prefix in environments:
@@ -792,8 +830,12 @@ class MainWindow(QMainWindow):
         self._search_input.setPlaceholderText(shell.text(TranslationKey.TOPBAR_SEARCH_PLACEHOLDER))
         self._environment_switcher.setItemText(0, shell.text(TranslationKey.TOPBAR_NO_ENVIRONMENT))
         self._theme_button.setToolTip(shell.text(TranslationKey.TOPBAR_TOGGLE_THEME))
+        # The button names the language a click switches *to*, not the one on
+        # screen: in Persian it reads "en" (click for English), in English it
+        # reads "Fa" (click for Persian), so the label is always the other
+        # script and the affordance is legible in both directions.
         self._language_button.setText(
-            "EN" if shell.translator.resolved_language is not Language.FA else "\u0641\u0627"
+            "en" if shell.translator.resolved_language is Language.FA else "Fa"
         )
         self._language_button.setToolTip(shell.text(TranslationKey.TOPBAR_TOGGLE_LANGUAGE))
         # The stack loop above covers every registered page; the log panel is not
@@ -842,6 +884,13 @@ class MainWindow(QMainWindow):
             self.restoreState(state)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
+        # Stop the workers before the window goes away: the task threads are
+        # daemons, so without this a package-manager command in flight would be
+        # orphaned mid-run - the child process keeps going with no timeout and
+        # no supervision left to watch it.
+        self._context.tasks.cancel_all()
+        self._context.tasks.shutdown(timeout=3.0)
+
         self._shell.apply_settings(
             _with_window_state(
                 self._shell.settings,

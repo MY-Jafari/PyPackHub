@@ -327,6 +327,9 @@ class TranslationKey(str, Enum):
     CONFIRM_FALLBACK_TITLE = "confirm.fallback.title"
     CONFIRM_FALLBACK_REASON = "confirm.fallback.reason"
     CONFIRM_FALLBACK_BUTTON = "confirm.fallback.button"
+    CONFIRM_BOOTSTRAP_TITLE = "confirm.bootstrap.title"
+    CONFIRM_BOOTSTRAP_REASON = "confirm.bootstrap.reason"
+    CONFIRM_BOOTSTRAP_BUTTON = "confirm.bootstrap.button"
 
     BLOCKED_TITLE = "blocked.title"
     BLOCKED_SUGGESTION = "blocked.suggestion"
@@ -763,6 +766,15 @@ EN_TABLE: dict[str, str] = {
         "through pip upgrades that copy, without administrator privileges."
     ),
     TranslationKey.CONFIRM_FALLBACK_BUTTON: "Run with pip",
+    TranslationKey.CONFIRM_BOOTSTRAP_TITLE: "%(backend)s is not installed",
+    TranslationKey.CONFIRM_BOOTSTRAP_REASON: (
+        "%(backend)s is not available on this machine. The commands above "
+        "install it into this environment first - pip through Python's "
+        "bundled ensurepip, uv as a package from the index - and the last "
+        "command is the one this action was about, run through %(backend)s "
+        "as you chose."
+    ),
+    TranslationKey.CONFIRM_BOOTSTRAP_BUTTON: "Install %(backend)s and continue",
     TranslationKey.BLOCKED_TITLE: "This environment cannot be modified",
     TranslationKey.BLOCKED_SUGGESTION: "Suggestion",
     TranslationKey.ENV_NO_MANAGER: (
@@ -1177,6 +1189,14 @@ FA_TABLE: dict[str, str] = {
         "نمی‌نویسد. همین کار با pip همان نسخه را ارتقا می‌دهد، بدون دسترسی مدیر."
     ),
     TranslationKey.CONFIRM_FALLBACK_BUTTON: "اجرای با pip",
+    TranslationKey.CONFIRM_BOOTSTRAP_TITLE: "\u200f%(backend)s نصب نیست",
+    TranslationKey.CONFIRM_BOOTSTRAP_REASON: (
+        "\u200f%(backend)s روی این دستگاه در دسترس نیست. دستورهای بالا ابتدا "
+        "آن را در همین محیط نصب می‌کنند — \u200fpip از طریق ensurepip خودِ "
+        "پایتون، و uv به‌عنوان یک بسته از مخزن — و آخرین دستور همان کاری است "
+        "که درخواست کردید، اجراشده از طریق \u200f%(backend)s به انتخاب شما."
+    ),
+    TranslationKey.CONFIRM_BOOTSTRAP_BUTTON: "نصب \u200f%(backend)s و ادامه",
     TranslationKey.BLOCKED_TITLE: "این محیط قابل تغییر نیست",
     TranslationKey.BLOCKED_SUGGESTION: "پیشنهاد",
     TranslationKey.ENV_NO_MANAGER: (

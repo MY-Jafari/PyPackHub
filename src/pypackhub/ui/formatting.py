@@ -1,17 +1,25 @@
 """Presentation helpers for the UI.
 
 These are the little conversions a view needs and nothing else does: turning a
-byte count into something a person reads, and turning a version into a sortable
-key. They are pure functions so they can be tested without a display server.
+byte count into something a person reads, turning a version into a sortable
+key, and reading the progress a package manager reports out of its own output
+lines. They are pure functions so they can be tested without a display server.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from packaging.version import InvalidVersion, Version
 
-__all__ = ["UNKNOWN_TEXT", "format_bytes", "format_count", "version_sort_key"]
+__all__ = [
+    "UNKNOWN_TEXT",
+    "format_bytes",
+    "format_count",
+    "parse_progress_percent",
+    "version_sort_key",
+]
 
 #: What the table shows where a value is genuinely not known. Deliberately not
 #: translatable: it is a placeholder glyph, not a sentence, and translating it
@@ -60,3 +68,35 @@ def version_sort_key(version: str) -> tuple[int, object]:
         return (0, Version(version))
     except InvalidVersion:
         return (1, version)
+
+
+#: One percentage the way a package manager prints it, whether as the current
+#: rich-style residue ("  ━━╸  45%  2.3/5.1 MB") or the older bracket bar
+#: ("[====>     ]  45%"). A percent sign followed by two hexadecimal
+#: characters is URL encoding in a wheel file name, not progress - a line
+#: like "Downloading pkg-2.0%2B1-py3-none-any.whl" must not move the bar.
+_PROGRESS_PERCENT: Final = re.compile(r"(\d{1,3})\s*%(?![0-9A-Fa-f]{2})")
+
+
+def parse_progress_percent(line: str) -> int | None:
+    """The progress one package-manager output line reports, if any.
+
+    pip's download progress is the percentage the log already shows; this
+    reads it back out so the run's progress bar can follow it. A manager
+    that reports no percentage (uv piped to a pipe, an ordinary message
+    line) answers ``None``, and the bar stays honestly animated instead of
+    inventing progress.
+
+    One line can carry several redraws when the manager separates them with
+    carriage returns inside a single chunk; the last is the newest, so that
+    is the one returned.
+    """
+    newest: str | None = None
+    for match in _PROGRESS_PERCENT.findall(line):
+        newest = match
+
+    if newest is None:
+        return None
+
+    value = int(newest)
+    return value if value <= 100 else None

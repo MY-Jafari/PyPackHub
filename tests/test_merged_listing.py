@@ -58,7 +58,9 @@ class ListingBackend(Backend):
         """Listing is all this backend is for; no test plans an action."""
         raise AssertionError("a listing test must not plan an action")
 
-    def list_packages(self, environment: Path, *, facts: Any = None) -> PackageListing:
+    def list_packages(
+        self, environment: Path, *, facts: Any = None, cancel: Any = None
+    ) -> PackageListing:
         if self._fail:
             raise BackendError(f"{self._name} cannot list this environment")
 

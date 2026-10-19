@@ -11,7 +11,9 @@ combo all at once.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -36,6 +38,7 @@ from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.toast import ToastKind
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["EnvironmentsView"]
 
@@ -66,6 +69,9 @@ class EnvironmentsView(QWidget):
     environment_selected = Signal(str)
     #: Emitted with a message and a :class:`~pypackhub.ui.widgets.toast.ToastKind`.
     toast = Signal(str, object)
+    #: The listing a discovery worker found, handed over from that thread;
+    #: Qt queues it onto the GUI thread because this widget lives there.
+    environments_ready = Signal(object)
 
     def __init__(
         self,
@@ -78,6 +84,8 @@ class EnvironmentsView(QWidget):
         self._context = context
         self._shell = shell
         self._listing: EnvironmentListing | None = None
+        self._load_task: str = ""
+        self._refreshing = False
 
         self._build_ui()
         self._connect()
@@ -134,22 +142,60 @@ class EnvironmentsView(QWidget):
 
     def _connect(self) -> None:
         self.refresh_button.clicked.connect(self._refresh)
+        self.environments_ready.connect(self._on_environments_ready)
 
     # -- data -------------------------------------------------------------
 
     def _load(self) -> None:
+        """Discover environments on a worker thread, never on the GUI one.
+
+        Discovery walks the standard roots and the working directory - on a
+        slow or networked home that takes seconds, and running it here used
+        to freeze the window before its first frame, because this method
+        runs in the constructor. The listing arrives by signal; until it
+        does the page shows its empty state, exactly like the packages table
+        before its own listing lands.
+        """
+        if self._load_task:
+            return
+
         roots: list[Path] = list(DEFAULT_SEARCH_ROOTS)
         roots.append(Path.cwd())
-        self._listing = detected_environments(tuple(roots))
+
+        def work(_task_id: str, _progress: object, _cancel: threading.Event) -> object:
+            return detected_environments(tuple(roots))
+
+        self._load_task = self._context.tasks.schedule(
+            self._shell.text(TranslationKey.NAV_ENVIRONMENTS),
+            work,
+            on_finish=lambda _task_id, result: emit_if_alive(self.environments_ready, result),
+        )
+
+    def _on_environments_ready(self, result: Any) -> None:
+        """Render the listing the worker found; a refresh reports its outcome."""
+        self._load_task = ""
+        listing = result.payload if isinstance(result.payload, EnvironmentListing) else None
+        if listing is not None:
+            self._listing = listing
         self._render()
 
-    def _refresh(self) -> None:
-        self._load()
+        if not self._refreshing:
+            return
+        self._refreshing = False
+        error = str(getattr(result, "error", "") or "")
+        if error:
+            self.toast.emit(error, ToastKind.ERROR)
+            return
         count = len(self._listing.environments) if self._listing else 0
         self.toast.emit(
             self._shell.text(TranslationKey.DEPS_SCANNED, count=count),
             ToastKind.SUCCESS,
         )
+
+    def _refresh(self) -> None:
+        """Reload; the toast follows the answer, not the click."""
+        self._refreshing = True
+        self._load()
 
     # -- rendering -------------------------------------------------------
 

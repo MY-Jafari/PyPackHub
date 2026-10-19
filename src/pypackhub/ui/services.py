@@ -16,6 +16,7 @@ views instead of being thrown away.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -50,10 +51,22 @@ class DefaultInventoryProvider:
         prefer_uv: bool = True,
         search_working_directory: bool = True,
         package_manager: str = "auto",
+        index_url: str = "",
+        extra_index_urls: Sequence[str] = (),
+        trusted_hosts: Sequence[str] = (),
+        cache_ttl: float = 300.0,
+        cache_max_versions: int = 32,
     ) -> None:
         self._prefer_uv = prefer_uv
         self._search_working_directory = search_working_directory
         self._package_manager = package_manager
+        self.set_index(
+            index_url=index_url,
+            extra_index_urls=extra_index_urls,
+            trusted_hosts=trusted_hosts,
+            cache_ttl=cache_ttl,
+            cache_max_versions=cache_max_versions,
+        )
 
     def set_package_manager(self, package_manager: str) -> None:
         """Record the backend the user forced for the environments.
@@ -63,11 +76,46 @@ class DefaultInventoryProvider:
         """
         self._package_manager = package_manager
 
+    def set_index(
+        self,
+        *,
+        index_url: str,
+        extra_index_urls: Sequence[str],
+        trusted_hosts: Sequence[str],
+        cache_ttl: float,
+        cache_max_versions: int,
+    ) -> None:
+        """Record the package-index configuration the settings describe.
+
+        Everything here was validated before it reached the provider. The
+        flags are what every installing command carries; the client is what
+        the version lookups ask - both point at the index the user chose,
+        which is the entire point of the settings page.
+        """
+        from pypackhub.core.pypi import PyPIClient
+
+        flags: list[str] = []
+        if index_url:
+            flags.extend(("--index-url", index_url))
+        for url in extra_index_urls:
+            flags.extend(("--extra-index-url", url))
+        for host in trusted_hosts:
+            flags.extend(("--trusted-host", host))
+
+        self._index_args = tuple(flags)
+        self._client = PyPIClient(
+            index_url=index_url or None,
+            ttl=cache_ttl,
+            max_versions=cache_max_versions,
+        )
+
     def create(self, prefix: Path) -> InventoryService:
         return InventoryService(
             prefix=prefix,
             prefer_uv=self._prefer_uv,
             backend_name=self._backend_name(prefix),
+            pypi_client=self._client,
+            index_args=self._index_args,
         )
 
     def _backend_name(self, prefix: Path) -> str:
@@ -145,6 +193,32 @@ class UiContext:
         update = getattr(self.provider, "set_package_manager", None)
         if callable(update):
             update(package_manager)
+        self._services.clear()
+
+    def set_index(
+        self,
+        *,
+        index_url: str,
+        extra_index_urls: tuple[str, ...] = (),
+        trusted_hosts: tuple[str, ...] = (),
+        cache_ttl: float = 300.0,
+        cache_max_versions: int = 32,
+    ) -> None:
+        """Point the services at the index the settings describe.
+
+        Same contract as :meth:`set_package_manager`: the provider is updated
+        in place and the services built for the previous index are discarded,
+        so a plan or a lookup never mixes one index's answers with another's.
+        """
+        update = getattr(self.provider, "set_index", None)
+        if callable(update):
+            update(
+                index_url=index_url,
+                extra_index_urls=extra_index_urls,
+                trusted_hosts=trusted_hosts,
+                cache_ttl=cache_ttl,
+                cache_max_versions=cache_max_versions,
+            )
         self._services.clear()
 
     def set_default_environment(self, prefix: Path) -> None:

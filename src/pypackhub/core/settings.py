@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -92,15 +93,15 @@ def validate_settings(settings: AppSettings) -> AppSettings:
     validated = AppSettings(
         theme=settings.theme,
         language=settings.language,
-        main_window_geometry=settings.main_window_geometry,
-        main_window_state=settings.main_window_state,
+        main_window_geometry=_window_blob(settings.main_window_geometry),
+        main_window_state=_window_blob(settings.main_window_state),
         sidebar_width=max(80, min(600, settings.sidebar_width)),
         package_list_page_size=max(10, min(500, settings.package_list_page_size)),
         default_environment_index=max(0, settings.default_environment_index),
         default_target_environment=settings.default_target_environment,
         pypi_index_url=validate_index_url(settings.pypi_index_url),
         extra_index_urls=tuple(validate_index_url(url) for url in settings.extra_index_urls),
-        trusted_hosts=tuple(settings.trusted_hosts),
+        trusted_hosts=tuple(host for host in map(_as_trusted_host, settings.trusted_hosts) if host),
         credential_store=settings.credential_store,
         pypi_cache_ttl=max(15.0, min(3600.0, settings.pypi_cache_ttl)),
         pypi_cache_max_versions=max(4, min(64, settings.pypi_cache_max_versions)),
@@ -117,6 +118,31 @@ def validate_settings(settings: AppSettings) -> AppSettings:
         validate_environment_name(validated.default_target_environment)
 
     return validated
+
+
+#: A window-state blob is a few hundred bytes; anything far larger is a
+#: hand-edited file, not a window position, and is dropped rather than read.
+_WINDOW_STATE_MAX_BYTES: Final = 8192
+
+#: What pip accepts as a ``--trusted-host`` value: a hostname or a host:port,
+#: and nothing else - no scheme, no path, no spaces, no shell characters.
+#: The entries are inert until a plan carries them, and by then each one is
+#: on a command line, so the shape is enforced where the value enters.
+_TRUSTED_HOST_PATTERN = re.compile(r"^[A-Za-z0-9._*-]{1,253}(?::\d{1,5})?$")
+
+
+def _window_blob(value: str) -> str:
+    """Keep a persisted window blob only when it is a plausible size."""
+    return value if len(value) <= _WINDOW_STATE_MAX_BYTES else ""
+
+
+def _as_trusted_host(value: object) -> str:
+    """One trusted-host entry, lowercased and shape-checked; empty is invalid."""
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if _TRUSTED_HOST_PATTERN.match(stripped):
+            return stripped
+    return ""
 
 
 def _as_package_manager(value: object) -> str:

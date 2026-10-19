@@ -90,7 +90,13 @@ def _next_id(directory: Path) -> str:
     milliseconds = int((moment % 1) * 1000)
 
     for attempt in range(1000):
-        candidate = f"{stamp}-{milliseconds + attempt:03d}"
+        # The suffix must stay three digits: it is part of the id pattern
+        # every reader validates against, so a wider number would write a
+        # file nothing can ever read back.
+        suffix = milliseconds + attempt
+        if suffix > 999:
+            break
+        candidate = f"{stamp}-{suffix:03d}"
         if not (directory / f"{candidate}.json").exists():
             return candidate
 

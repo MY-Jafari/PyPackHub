@@ -38,6 +38,7 @@ from pypackhub.ui.formatting import format_bytes
 from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["DashboardView"]
 
@@ -89,6 +90,7 @@ class DashboardView(QWidget):
         self._vulnerable_count: int | None = None
         self._vulnerable_time: str = ""
         self._orphan_count: int | None = None
+        self._orphans_task: str = ""
         self._purpose: str = "general"
 
         self.setObjectName("dashboardPanel")
@@ -167,6 +169,11 @@ class DashboardView(QWidget):
 
     def _count_orphans(self) -> None:
         """Count orphans on a worker thread, from the shared metadata index."""
+        # One count at a time: every visit here schedules a listing subprocess,
+        # so rapid view-switching would otherwise stack them.
+        if self._orphans_task:
+            return
+
         context = self._context
         environment = context.default_environment
 
@@ -177,13 +184,14 @@ class DashboardView(QWidget):
             graph = build_graph(index, installed_names=tuple(row.name for row in inventory.rows))
             return graph.orphans()
 
-        context.tasks.schedule(
+        self._orphans_task = context.tasks.schedule(
             self._shell.text(TranslationKey.DASHBOARD_TITLE),
             work,
-            on_finish=lambda _task_id, result: self.orphans_ready.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.orphans_ready, result),
         )
 
     def _on_orphans_ready(self, result: Any) -> None:
+        self._orphans_task = ""
         report = result.payload
         orphans = getattr(report, "orphans", None)
         if orphans is not None:

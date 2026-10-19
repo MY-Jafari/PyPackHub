@@ -281,6 +281,7 @@ class Backend(ABC):
         environment: Path,
         *,
         facts: InterpreterFacts | None = None,
+        cancel: threading.Event | None = None,
     ) -> PackageListing:
         """Return the installed packages in *environment* through this backend."""
 

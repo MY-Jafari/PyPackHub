@@ -40,6 +40,7 @@ from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
 from pypackhub.ui.widgets.spinner import Spinner, SpinnerSize
 from pypackhub.ui.widgets.toast import ToastKind
+from pypackhub.ui.worker_signals import emit_if_alive
 
 __all__ = ["SecurityView"]
 
@@ -196,12 +197,18 @@ class SecurityView(QWidget):
             service = context.service_for(context.default_environment)
             inventory = service.list()
             pairs = [(row.name, row.installed) for row in inventory.rows if row.installed]
-            return client.scan(pairs, cancel=cancel, on_finding=self.finding_arrived.emit)
+            return client.scan(
+                pairs,
+                cancel=cancel,
+                # Both callbacks run on the scan's driving thread; the guarded
+                # emit is the one sanctioned way to cross to the GUI thread.
+                on_finding=lambda finding: emit_if_alive(self.finding_arrived, finding),
+            )
 
         self._task = context.tasks.schedule(
             self._shell.text(TranslationKey.SECURITY_TITLE),
             work,
-            on_finish=lambda _task_id, result: self.scan_finished.emit(result),
+            on_finish=lambda _task_id, result: emit_if_alive(self.scan_finished, result),
         )
 
     def _set_scanning(self, scanning: bool) -> None:

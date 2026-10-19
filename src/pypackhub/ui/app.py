@@ -77,15 +77,34 @@ def build_application(argv: list[str] | None = None) -> QApplication:
     return application
 
 
-def build_context(*, prefer_uv: bool = True, package_manager: str = "auto") -> UiContext:
+def build_context(
+    *,
+    prefer_uv: bool = True,
+    package_manager: str = "auto",
+    index_url: str = "",
+    extra_index_urls: tuple[str, ...] = (),
+    trusted_hosts: tuple[str, ...] = (),
+    cache_ttl: float = 300.0,
+    cache_max_versions: int = 32,
+) -> UiContext:
     """Build the services the views run against.
 
     ``prefer_uv`` follows SPEC section 2: when uv is installed, it is the backend
     for an environment, because it is dramatically faster, and every action still
-    goes through the same hardened runner either way.
+    goes through the same hardened runner either way. The index settings come
+    from the shell's persisted settings: they decide which index the version
+    lookups ask and which index flags every installing command carries.
     """
     return UiContext(
-        provider=DefaultInventoryProvider(prefer_uv=prefer_uv, package_manager=package_manager)
+        provider=DefaultInventoryProvider(
+            prefer_uv=prefer_uv,
+            package_manager=package_manager,
+            index_url=index_url,
+            extra_index_urls=extra_index_urls,
+            trusted_hosts=trusted_hosts,
+            cache_ttl=cache_ttl,
+            cache_max_versions=cache_max_versions,
+        )
     )
 
 
@@ -96,7 +115,7 @@ def build_window(
     shell = WindowShell(store=store or QSettingsStore())
     shell.load()
 
-    package_manager = shell.settings.package_manager
+    settings = shell.settings
 
     # ``shell=`` is PyPackHub's own window-shell object, not a command shell;
     # the ``# nosec`` below is a false positive on the keyword's name (B604,
@@ -106,7 +125,15 @@ def build_window(
     # the call suppresses nothing (and draws a warning of its own).
     window = MainWindow(
         shell=shell,  # nosec B604
-        context=context or build_context(package_manager=package_manager),
+        context=context
+        or build_context(
+            package_manager=settings.package_manager,
+            index_url=settings.pypi_index_url,
+            extra_index_urls=tuple(settings.extra_index_urls),
+            trusted_hosts=tuple(settings.trusted_hosts),
+            cache_ttl=settings.pypi_cache_ttl,
+            cache_max_versions=settings.pypi_cache_max_versions,
+        ),
     )
     window.apply_theme()
     return window

@@ -47,7 +47,11 @@ def store(tmp_path: Path) -> QSettingsStore:
 
 
 @pytest.fixture
-def window(qapp: QApplication, store: QSettingsStore) -> MainWindow:
+def window(qapp, store, monkeypatch) -> MainWindow:
+    # The environments page now discovers on a worker thread; these tests
+    # are about the window, so the scan is pinned to an empty answer rather
+    # than walking the machine's real home directory fifteen times.
+    monkeypatch.setattr("pypackhub.ui.views.environments.detected_environments", lambda roots: None)
     shell = WindowShell(store=store)
     shell.load()
     built = MainWindow(shell=shell)
@@ -150,6 +154,26 @@ def test_the_stylesheet_is_mirrored_with_the_layout(window: MainWindow, qapp: QA
     assert "border-right: 1px solid" not in qapp.styleSheet()
 
 
+def test_the_language_button_names_the_language_it_switches_to(
+    window: MainWindow,
+) -> None:
+    """The button reads as the *other* language, so it stays legible.
+
+    In Persian it says "en" (click for English); in English it says "Fa"
+    (click for Persian). Showing the active language's own script instead
+    made the affordance unreadable in exactly the direction it mattered.
+    """
+    assert window.shell.translator.resolved_language is Language.EN
+    assert window._language_button.text() == "Fa"
+
+    window.toggle_language()
+    assert window.shell.settings.language is Language.FA
+    assert window._language_button.text() == "en"
+
+    window.toggle_language()
+    assert window._language_button.text() == "Fa"
+
+
 def test_language_switch_retranslates_the_navigation(window: MainWindow) -> None:
     window.toggle_language()
     assert PERSIAN_PACKAGES in _nav_labels(window)
@@ -235,3 +259,24 @@ def test_picking_a_package_manager_applies_to_the_running_window(window: MainWin
 
     assert window.shell.settings.package_manager == "uv"
     assert window.context.package_manager == "uv"
+
+
+def test_environment_discovery_fills_the_switcher_off_the_gui_thread(
+    qtbot, window: MainWindow, monkeypatch
+) -> None:
+    """Discovery runs on a worker thread; the combo fills when it answers.
+
+    The window used to scan the filesystem inside showEvent's timer - still
+    the GUI thread, freezing the frame the moment the window appeared on a
+    machine with a slow or networked home directory.
+    """
+    where = Path("/fake/env").resolve()
+    monkeypatch.setattr(window.context, "environments", lambda: (where,))
+
+    window.load_environments()
+    # Waiting on the row itself, not the count: the combo carries a
+    # placeholder row from construction, so any count is already non-zero
+    # before discovery answers.
+    qtbot.waitUntil(lambda: window._environment_switcher.findData(str(where)) >= 0, timeout=5000)
+
+    assert window._environment_switcher.currentData() == str(where)

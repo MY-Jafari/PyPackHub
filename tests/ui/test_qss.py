@@ -124,14 +124,25 @@ def test_the_sidebar_divider_follows_the_layout_direction() -> None:
     rtl = build_qss(LIGHT, rtl=True)
     assert "border-right: 1px solid" in ltr
     assert "border-left: 1px solid" in rtl
+    # text-align is logical and mirrors itself: "left" is the reading edge in
+    # both directions, so the nav rule must not flip with the sheet. Saying
+    # "right" for Persian mirrored twice and pinned the labels to the
+    # physical left of each button - the far edge, the wrong side entirely.
     assert "text-align: left" in ltr
-    assert "text-align: right" in rtl
+    assert "text-align: left" in rtl
     assert ltr != rtl
 
 
 def test_direction_only_changes_the_edges_it_must() -> None:
+    # Everything logical - text alignment, reading order - mirrors by itself
+    # once the layout direction is set; only physical edges need the sheet to
+    # differ per direction. If anything other than a border line ever
+    # differs between the two builds, a logical property is being
+    # compensated for twice - which is how Persian nav labels ended up on
+    # the far left of a right-anchored sidebar.
     ltr = build_qss(DARK).splitlines()
     rtl = build_qss(DARK, rtl=True).splitlines()
     assert len(ltr) == len(rtl)
     differing = [line for line in ltr if line not in rtl]
-    assert all("border-" in line or "text-align" in line for line in differing)
+    assert differing
+    assert all("border-" in line for line in differing)

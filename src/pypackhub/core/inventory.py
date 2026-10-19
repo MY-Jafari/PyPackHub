@@ -25,6 +25,11 @@ Three properties matter and are deliberate:
 from __future__ import annotations
 
 import threading
+
+# ``list`` is shadowed inside InventoryService's class body - the ``.list()``
+# method wins over the builtin, so mypy resolves a bare ``list`` annotation
+# there to a method - which is why every annotation in this module that
+# means the type says ``_list``.
 from builtins import list as _list
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -46,7 +51,7 @@ from pypackhub.core.backends.base import (
     UnsupportedBackendError,
 )
 from pypackhub.core.backends.pip import PipBackend
-from pypackhub.core.backends.uv import UvBackend
+from pypackhub.core.backends.uv import UvBackend, uv_path_in_prefix
 from pypackhub.core.metadata import (
     InstalledMetadataIndex,
     own_site_packages_directories,
@@ -60,7 +65,7 @@ from pypackhub.core.platform_guard import (
     inspect,
     modification_policy,
 )
-from pypackhub.core.runner import CommandResult
+from pypackhub.core.runner import CommandResult, ExecutableNotFoundError, run
 
 __all__ = [
     "Inventory",
@@ -243,6 +248,39 @@ def _make_backend(name: str, prefix: Path, interpreter: Path | None) -> Backend:
     raise ValueError(f"unknown backend {name!r}")
 
 
+#: What a manager's own error says when the manager itself is missing rather
+#: than broken. These strings are the absence the probes catch before a
+#: command runs - the same condition, discovered one command later. They are
+#: matched against the manager's own words, not loosely, so a real listing
+#: failure that happens to mention "not found" is not misread as absence.
+_ABSENCE_MARKERS: Final = (
+    "no module named pip",  # python -m pip without the pip module
+    "pip could not be found",  # pip's probe message
+    "uv could not be found",  # uv's probe message
+    "is not available on this system",  # both probes' wrapped message
+)
+
+
+def _is_absence(message: str) -> bool:
+    """Whether *message* says the manager was missing, not that it failed."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _ABSENCE_MARKERS)
+
+
+def _default_index() -> PackageIndex:
+    """The public PyPI client, built once per service when none is injected."""
+    from pypackhub.core.pypi import PyPIClient
+
+    return PyPIClient()
+
+
+#: The action kinds whose commands resolve packages against an index, and are
+#: therefore the ones that carry the configured index flags.
+_INSTALLING_KINDS: Final = frozenset(
+    {ActionKind.INSTALL, ActionKind.UPGRADE, ActionKind.DOWNGRADE, ActionKind.UPGRADE_ALL}
+)
+
+
 def build_backend(
     prefix: Path,
     *,
@@ -358,12 +396,22 @@ class InventoryService:
         backend_name: str = "",
         pypi_client: PackageIndex | None = None,
         prefer_uv: bool = True,
+        index_args: Sequence[str] = (),
     ) -> None:
         self._prefix = Path(prefix).resolve() if prefix is not None else current_prefix()
         self._prefer: tuple[str, ...] = ("uv", "pip") if prefer_uv else ("pip",)
         self._backend = backend
         self._backend_name = backend_name
-        self._pypi = pypi_client
+        # The client is built eagerly rather than lazily: two worker threads
+        # reaching the lazy branch at once used to build two HTTP clients,
+        # one of which was never closed.
+        self._pypi: PackageIndex = pypi_client if pypi_client is not None else _default_index()
+        #: Memoized "does ``python -m pip`` run here" - see
+        #: :meth:`_interpreter_has_pip`.
+        self._pip_module: bool | None = None
+        #: Flags (``--index-url`` & friends) the settings ask every installing
+        #: command to carry, already validated. Empty means the public index.
+        self._index_args: tuple[str, ...] = tuple(index_args)
         self._facts: InterpreterFacts | None = None
         self._metadata: InstalledMetadataIndex | None = None
 
@@ -400,14 +448,17 @@ class InventoryService:
 
     # -- listing --------------------------------------------------------
 
-    def list(self) -> Inventory:
+    def list(self, *, cancel: threading.Event | None = None) -> Inventory:
         """List the installed packages. Local only: no network, no size walk.
 
         The listing merges every usable backend for the environment so a package is
         never invisible just because one manager did not report it. The backend used
         for actions is still decided separately by the user's package-manager choice.
+        ``cancel`` stops the listing the way it stops every other pass: a backend
+        command already running finishes (the runner checks the event), but nothing
+        new is started once it is set.
         """
-        merged, error, timed_out, backend_name = self._merge_listings()
+        merged, error, timed_out, backend_name = self._merge_listings(cancel=cancel)
         return Inventory(
             environment=self._prefix,
             backend=backend_name,
@@ -416,7 +467,9 @@ class InventoryService:
             timed_out=timed_out,
         )
 
-    def _merge_listings(self) -> tuple[_list[PackageRow], str, bool, str]:
+    def _merge_listings(
+        self, *, cancel: threading.Event | None = None
+    ) -> tuple[_list[PackageRow], str, bool, str]:
         """List through every usable backend and merge the results.
 
         The backends are asked **at the same time**. Running them one after the
@@ -436,8 +489,10 @@ class InventoryService:
         with ThreadPoolExecutor(
             max_workers=max(1, len(order)), thread_name_prefix="pypackhub-list"
         ) as pool:
-            futures = {name: pool.submit(self._list_one, name, facts) for name in order}
+            futures = {name: pool.submit(self._list_one, name, facts, cancel) for name in order}
             listings = [(name, futures[name].result()) for name in order]
+            if _is_cancelled(cancel):
+                return [], "", False, "pip"
 
         rows: dict[str, PackageRow] = {}
         error_parts: list[str] = []
@@ -490,13 +545,25 @@ class InventoryService:
         """
         return sorted(listings, key=lambda listing: listing.backend != "pip")
 
-    def _list_one(self, name: str, facts: InterpreterFacts) -> PackageListing | None:
+    def _list_one(
+        self,
+        name: str,
+        facts: InterpreterFacts,
+        cancel: threading.Event | None = None,
+    ) -> PackageListing | None:
         """List this environment through one backend, or ``None`` when unusable.
 
         A backend that is not installed, or that fails outright, is skipped
         rather than raised: the merged listing exists so that one broken or
         missing package manager does not hide the packages the other reports.
+        A backend whose *own tool* turns out to be missing once it runs -
+        ``python -m pip`` on an interpreter without the pip module, a uv the
+        PATH resolution could not find - is the same absence as one the probe
+        already rejected, not a failure the user should be shown: with the
+        automatic choice a machine without uv must simply use pip, quietly.
         """
+        if _is_cancelled(cancel):
+            return None
         try:
             backend = _make_backend(name, self._prefix, facts.executable)
             backend.executable_path()
@@ -504,8 +571,10 @@ class InventoryService:
             return None
 
         try:
-            return backend.list_packages(self._prefix, facts=facts)
+            return backend.list_packages(self._prefix, facts=facts, cancel=cancel)
         except BackendError as error:
+            if _is_absence(str(error)):
+                return None
             return PackageListing(
                 environment=self._prefix,
                 backend=name,
@@ -519,14 +588,7 @@ class InventoryService:
         A network failure is reported as an error on the row rather than raised:
         an offline machine must still show the installed packages.
         """
-        client = self._pypi
-        if client is None:
-            from pypackhub.core.pypi import PyPIClient
-
-            client = PyPIClient()
-            self._pypi = client
-
-        info = client.info(name)
+        info = self._pypi.info(name)
         return PackageIndexInfo(
             latest=str(getattr(info, "latest_version", "") or ""),
             summary=str(getattr(info, "summary", "") or ""),
@@ -598,7 +660,7 @@ class InventoryService:
         refresh stays entirely local - which is what a user wants when they know
         they are offline.
         """
-        inventory = self.list()
+        inventory = self.list(cancel=cancel)
         if on_listed is not None:
             on_listed(inventory)
 
@@ -674,7 +736,27 @@ class InventoryService:
         """Build the command that would run *action*, validated and unexecuted."""
         if not self.backend.capability.supports(action.kind):
             raise UnsupportedBackendError(f"{self.backend_name} cannot perform {action.kind.value}")
-        return self.backend.plan(action)
+        return self._with_index_args(self.backend.plan(action))
+
+    def _with_index_args(self, plan: CommandPlan) -> CommandPlan:
+        """Carry the configured index flags on every installing command.
+
+        The settings page's index URL, extra indexes and trusted hosts were
+        validated before they got here; inserting them before the ``--``
+        separator puts them where pip and uv read them, and the confirmation
+        dialog shows the result because it is derived from this same ``argv``
+        (SPEC section 11.7). No flags, no change: the public index needs
+        nothing said out loud.
+        """
+        if not self._index_args or plan.action.kind not in _INSTALLING_KINDS:
+            return plan
+
+        argv = plan.argv
+        separator = argv.index("--") if "--" in argv else len(argv)
+        return replace(
+            plan,
+            argv=(*argv[:separator], *self._index_args, *argv[separator:]),
+        )
 
     def plan_with_backend(self, name: str, action: PackageAction) -> CommandPlan:
         """Plan *action* through a different backend for this environment.
@@ -692,7 +774,175 @@ class InventoryService:
             raise UnsupportedBackendError(f"{name} is not available")
         if not backend.capability.supports(action.kind):
             raise UnsupportedBackendError(f"{name} cannot perform {action.kind.value}")
-        return backend.plan(action)
+        return self._with_index_args(backend.plan(action))
+
+    # -- the missing-manager bootstrap ------------------------------------
+
+    def required_backend_missing(self) -> str:
+        """The chosen manager's name when it cannot run here, ``""`` when it can.
+
+        With the automatic choice this never turns a missing manager into a
+        refusal: the first preference that works is simply used. Only when
+        *nothing* works is the bootstrap-able baseline (pip, through
+        Python's bundled ensurepip) reported missing, so the user is offered
+        "set it up" rather than shown an error. A manager forced in the
+        settings is reported missing when exactly that one cannot run: the
+        user's choice is honoured by installing it, never by silently
+        substituting another backend.
+        """
+        if self._backend_name:
+            return "" if self._backend_works(self._backend_name) else self._backend_name
+        for candidate in self._prefer:
+            if self._backend_works(candidate):
+                return ""
+        return "pip"
+
+    def _backend_works(self, name: str) -> bool:
+        """Whether *name* can genuinely run against this environment.
+
+        pip's probe only proves the interpreter exists - the module is what
+        the commands actually run - so a pip whose module is missing (a
+        uv-created virtual environment ships without one) is probed for
+        real. uv is probed by resolution, the environment's own prefix
+        included, which is where the bootstrap below installs it.
+        """
+        try:
+            backend = build_backend(self._prefix, name=name, prefer=(), require=False)
+        except (UnsupportedBackendError, ValueError, OSError):
+            return False
+        if backend is None:
+            return False
+        if name == "pip":
+            return self._interpreter_has_pip()
+        return True
+
+    def _interpreter_has_pip(self) -> bool:
+        """Whether ``<interpreter> -m pip`` would run, checked by asking it.
+
+        The answer is memoized: the probe spawns the interpreter, and the
+        confirm path runs on the GUI thread, where a fresh spawn per click
+        would freeze the window. The module can only appear or disappear
+        because this application itself installed or removed it, so the cache
+        is cleared by :meth:`invalidate_backend_state` after exactly those
+        runs - never speculatively.
+        """
+        if self.facts.executable is None:
+            # There is no interpreter to ask, so no probe may run: without
+            # this the memo below would spawn a command whose first word is
+            # the string "None". The answer is no, memoized like any other.
+            self._pip_module = False
+            return False
+
+        if self._pip_module is not None:
+            return self._pip_module
+        try:
+            result = run([str(self.facts.executable), "-c", "import pip"], timeout=10)
+        except (ExecutableNotFoundError, OSError, ValueError):
+            self._pip_module = False
+            return False
+        self._pip_module = result.ok
+        return result.ok
+
+    def invalidate_backend_state(self) -> None:
+        """Forget what was probed about the installed managers.
+
+        Called after a run that could have changed the facts: the bootstrap
+        that installs pip or uv is the only thing that can make a previously
+        missing manager usable inside this environment.
+        """
+        self._backend = None
+        self._pip_module = None
+
+    def bootstrap_plans(self, missing: str, *, action: PackageAction) -> _list[CommandPlan]:
+        """The commands that make *missing* usable inside this environment.
+
+        pip is set up through ``ensurepip`` - the wheel Python ships with,
+        no network needed. uv is a package on the index, so it is installed
+        with pip - and pip itself is set up first when the interpreter does
+        not have it. The plans carry *action* because they exist for it: the
+        confirmation explains that, the history records it, and the queue the
+        UI builds runs them before the action's own command.
+        """
+        executable = self.facts.executable
+        if executable is None:
+            # Without an interpreter there is nothing to bootstrap and no
+            # command worth showing; a "None" would only be a broken argv.
+            raise UnsupportedBackendError(
+                "this environment has no interpreter to install a package manager into"
+            )
+
+        plans: _list[CommandPlan] = []
+        if missing == "pip":
+            plans.append(self._ensurepip_plan(action))
+        elif missing == "uv":
+            if not self._interpreter_has_pip():
+                plans.append(self._ensurepip_plan(action))
+            plans.append(
+                CommandPlan(
+                    argv=(
+                        str(executable),
+                        "-m",
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "--",
+                        "uv",
+                    ),
+                    action=action,
+                    label="install uv",
+                    backend="pip",
+                )
+            )
+        return plans
+
+    def _ensurepip_plan(self, action: PackageAction) -> CommandPlan:
+        executable = self.facts.executable
+        if executable is None:  # pragma: no cover - bootstrap_plans guards first
+            raise UnsupportedBackendError("this environment has no interpreter")
+        return CommandPlan(
+            argv=(str(executable), "-m", "ensurepip", "--upgrade"),
+            action=action,
+            label="install pip",
+            backend="pip",
+        )
+
+    def bootstrap_needs_elevation(self) -> bool:
+        """Whether the bootstrap batch can only write with the OS's help.
+
+        Installing a manager into the environment writes to the same place
+        every other install does; an environment the current user may not
+        change needs the same elevation any action would, and the batch is
+        refused (not silently queued) when the OS cannot provide it.
+        """
+        return not site_packages_writable(self._prefix)
+
+    def plan_assuming_backend(self, name: str, action: PackageAction) -> CommandPlan:
+        """Plan *action* through *name* without requiring it to be installed yet.
+
+        The bootstrap flow needs the command the chosen manager will run
+        before that manager exists, so the plan's first word is the path the
+        installing command is about to fill. It runs only after the install
+        succeeded - the queue the UI builds guarantees the order - and the
+        hardened runner resolves that first word like any other executable.
+        """
+        executable = self.facts.executable
+        if executable is None:
+            # Nothing runs a package manager without an interpreter, and a
+            # "None" on a command line the confirmation would show is worse
+            # than a refusal; the caller reports this like any other backend
+            # error instead of offering an impossible bootstrap.
+            raise UnsupportedBackendError(
+                "this environment has no interpreter to run a package manager with"
+            )
+        if name == "uv":
+            backend: Backend = UvBackend(
+                executable=uv_path_in_prefix(self._prefix), python=executable
+            )
+        else:
+            backend = PipBackend(prefix=self._prefix, python=executable)
+        if not backend.capability.supports(action.kind):
+            raise UnsupportedBackendError(f"{name} cannot perform {action.kind.value}")
+        return self._with_index_args(backend.plan(action))
 
     def execute(
         self,
@@ -732,7 +982,7 @@ class InventoryService:
             return False
         return not site_packages_writable(self._prefix)
 
-    def backend_can_reach_targets(self, action: PackageAction) -> bool:
+    def backend_can_reach_targets(self, action: PackageAction, *, backend_name: str = "") -> bool:
         """Whether this backend can change what the interpreter imports for *action*.
 
         On a base interpreter the user site directory shadows the environment's
@@ -752,8 +1002,17 @@ class InventoryService:
         trips this check. Packages the index knows nothing about are equally
         safe: nothing shadows them yet, so the install lands where ``import``
         will look.
+
+        ``backend_name`` answers the question for a manager that is not the
+        service's resolved one - the bootstrap flow asks it about a uv that
+        is not installed yet, and the answer must reflect *uv's* semantics
+        (no user-site path), not whatever backend the service fell back to.
         """
-        if self.backend.capability.can_install_user:
+        if backend_name:
+            capability = _make_backend(backend_name, self._prefix, None).capability
+        else:
+            capability = self.backend.capability
+        if capability.can_install_user:
             return True
 
         index = self.metadata_index()

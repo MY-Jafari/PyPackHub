@@ -13,6 +13,8 @@ the table view will fill it lazily, and later sections add a disk-backed cache.
 
 from __future__ import annotations
 
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from time import monotonic
@@ -33,6 +35,30 @@ __all__ = [
 
 PYPI_JSON_BASE: Final = "https://pypi.org/pypi"
 PYPI_SIMPLE_BASE: Final = "https://pypi.org/simple"
+
+#: How many cached lookups one client keeps before the least recently used
+#: start being evicted. Large enough that a full refresh's worth of packages
+#: stays warm; small enough that a long session cannot grow without end.
+_MAX_CACHE_ENTRIES: Final = 1024
+
+
+def _json_base_for(index_url: str | None) -> str:
+    """The JSON endpoint root that belongs to *index_url*.
+
+    An index is configured as its simple-index root (``.../simple``); the
+    JSON API this client reads lives next to it (``.../pypi``). Anything
+    that already looks like the JSON root is taken as-is, and no URL means
+    the public index.
+    """
+    if not index_url:
+        return PYPI_JSON_BASE
+
+    trimmed = index_url.rstrip("/")
+    if trimmed.endswith("/pypi"):
+        return trimmed
+    if trimmed.endswith("/simple"):
+        return trimmed[: -len("/simple")] + "/pypi"
+    return trimmed + "/pypi"
 
 
 @dataclass(slots=True)
@@ -70,34 +96,53 @@ class PackageNotFoundError(ValueError):
 
 
 class PyPICache:
-    """A tiny in-memory cache for PyPI lookups.
+    """A bounded, thread-safe in-memory cache for PyPI lookups.
 
-    This is the section 2 skeleton. It is deliberately simple: package name to
-    info, with an age check. A later section adds a disk cache and eviction
-    policy.
+    Entries expire by age and the store keeps at most *max_entries*, evicting
+    the least recently used. The bound exists because the table asks about
+    every package it has ever listed: without one, a long session over a
+    large environment grows memory without end. Lookups run from several
+    worker threads, so every access takes the lock.
     """
 
-    def __init__(self, *, ttl: float = 300.0) -> None:
+    def __init__(self, *, ttl: float = 300.0, max_entries: int = 1024) -> None:
         self._ttl = ttl
-        self._store: dict[str, PackageInfo] = {}
+        self._max_entries = max(8, int(max_entries))
+        self._store: OrderedDict[str, PackageInfo] = OrderedDict()
+        self._lock = threading.Lock()
 
     def get(self, name: str) -> PackageInfo | None:
-        info = self._store.get(name)
-        if info is None:
-            return None
-        if monotonic() - info.last_checked > self._ttl:
-            return None
-        return info
+        with self._lock:
+            info = self._store.get(name)
+            if info is None:
+                return None
+            if monotonic() - info.last_checked > self._ttl:
+                del self._store[name]
+                return None
+            self._store.move_to_end(name)
+            return info
 
     def set(self, info: PackageInfo) -> None:
-        self._store[info.name] = info
+        with self._lock:
+            self._store[info.name] = info
+            self._store.move_to_end(info.name)
+            while len(self._store) > self._max_entries:
+                self._store.popitem(last=False)
 
     def clear(self) -> None:
-        self._store.clear()
+        with self._lock:
+            self._store.clear()
 
 
 class PyPIClient:
-    """PyPI client with an HTTPS-only HTTP layer and a small TTL cache."""
+    """PyPI client with an HTTPS-only HTTP layer and a small TTL cache.
+
+    ``index_url`` is the package index the user configured - a simple-index
+    root such as ``https://pypi.org/simple`` or a private mirror. The JSON
+    endpoints this client reads are derived from it, so lookups answer from
+    the index the user actually use, not silently from the public one. When
+    it is empty the public index is used.
+    """
 
     def __init__(
         self,
@@ -105,9 +150,16 @@ class PyPIClient:
         http: HttpClient | None = None,
         cache: PyPICache | None = None,
         ttl: float | None = None,
+        index_url: str | None = None,
+        max_versions: int = 32,
     ) -> None:
         self._http = http or HttpClient(allow_insecure_http=False)
-        self._cache = cache or PyPICache(ttl=ttl if ttl is not None else 300.0)
+        self._cache = cache or PyPICache(
+            ttl=ttl if ttl is not None else 300.0,
+            max_entries=_MAX_CACHE_ENTRIES,
+        )
+        self._json_base = _json_base_for(index_url)
+        self._max_versions = max(1, int(max_versions))
 
     def close(self) -> None:
         self._http.close()
@@ -153,7 +205,7 @@ class PyPIClient:
     # ------------------------------------------------------------------
 
     def _fetch_info(self, name: str) -> PackageInfo:
-        url = f"{PYPI_JSON_BASE}/{name}/json"
+        url = f"{self._json_base}/{name}/json"
 
         try:
             payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)
@@ -170,7 +222,10 @@ class PyPIClient:
         info = self._parse_json_info(name, payload)
         info.last_checked = monotonic()
         info.fetched = True
-        self._cache.set(info)
+        # A response that parsed into an error is not an answer: caching it
+        # would serve the same failure for the whole TTL instead of retrying.
+        if not info.error:
+            self._cache.set(info)
         return info
 
     @staticmethod
@@ -186,17 +241,19 @@ class PyPIClient:
         )
 
     def _fetch_versions(self, name: str) -> tuple[str, ...]:
-        url = f"{PYPI_JSON_BASE}/{name}/json"
+        url = f"{self._json_base}/{name}/json"
 
         try:
             payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)
         except (HttpError, ResponseTooLargeError):
             return ()
 
-        return tuple(sorted(self._parse_json_versions(payload), reverse=True))
+        # The settings cap how many versions are worth carrying around; the
+        # picker only shows the newest ones anyway.
+        return tuple(sorted(self._parse_json_versions(payload), reverse=True)[: self._max_versions])
 
     def _fetch_distributions(self, name: str, version: str) -> dict[str, Any]:
-        url = f"{PYPI_JSON_BASE}/{name}/{version}/json"
+        url = f"{self._json_base}/{name}/{version}/json"
 
         try:
             payload = self._http.get_json(url, max_bytes=4 * 1024 * 1024)

@@ -108,7 +108,9 @@ class DetailPanel(QWidget):
         body.setSpacing(12)
 
         self._form = QFormLayout()
-        self._form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # AlignLeading keeps the labels on the reading edge of whichever
+        # language is active: left in English, right in Persian.
+        self._form.setLabelAlignment(Qt.AlignmentFlag.AlignLeading)
         self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         body.addLayout(self._form)
 

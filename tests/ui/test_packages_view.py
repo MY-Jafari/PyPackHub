@@ -50,7 +50,12 @@ from pypackhub.ui.services import UiContext
 from pypackhub.ui.views import packages as packages_module
 from pypackhub.ui.views.packages import PackagesView
 from pypackhub.ui.views.window_shell import QSettingsStore, WindowShell
-from pypackhub.ui.widgets.dialogs import ConfirmationDialog, ElevationNotice, FallbackNotice
+from pypackhub.ui.widgets.dialogs import (
+    BootstrapNotice,
+    ConfirmationDialog,
+    ElevationNotice,
+    FallbackNotice,
+)
 from pypackhub.ui.widgets.log_panel import LogPanel
 
 pytestmark = pytest.mark.gui
@@ -77,9 +82,15 @@ class FakeService:
         self.backend = FakeBackend()
         self.listings: list[dict[str, str]] = []
         self.invalidations = 0
+        #: The environment label the fake's listings carry. The real listing
+        #: names the environment it read; the fake lets a test say which one.
+        self.listing_environment: Path = PREFIX
         #: When set, ``refresh`` reports its listing and then waits here, which is
         #: how a refresh is held open while a change happens underneath it.
         self.hold: threading.Event | None = None
+        #: When set, ``execute`` waits here before returning, which holds a
+        #: change open long enough to observe the run's progress indication.
+        self.run_hold: threading.Event | None = None
         #: When set, ``refresh`` fails *after* reporting its listing, which is the
         #: shape of a listing that worked followed by an index that did not.
         self.fail_after_listing = False
@@ -90,8 +101,19 @@ class FakeService:
         #: When False, the backend cannot change what the interpreter imports
         #: for its targets (the user-site shadowing case).
         self.can_reach_targets = True
+        #: The same answer for a uv the bootstrap flow assumes: uv has no
+        #: user-site path, so shadowed targets are unreachable through it.
+        self.uv_can_reach = True
         #: When set, the pip fallback cannot be planned (no pip on the machine).
         self.fallback_raises = False
+        #: What ``required_backend_missing`` reports: empty means "usable".
+        self.missing_backend = ""
+        #: The labels of the plans ``execute`` was asked for, in order.
+        self.executed: list[str] = []
+        #: Whether the environment is writable; drives the bootstrap elevation.
+        self.writable = True
+        #: Whether ``invalidate_backend_state`` was called.
+        self.backend_state_invalidations = 0
 
     @property
     def facts(self) -> InterpreterFacts:
@@ -140,8 +162,9 @@ class FakeService:
             )
             for name, version in sorted(self.versions.items())
         )
+        environment = self.listing_environment
         if on_listed is not None:
-            on_listed(Inventory(environment=PREFIX, backend="pip", rows=rows))
+            on_listed(Inventory(environment=environment, backend="pip", rows=rows))
 
         if self.hold is not None:
             # A held pass stands in for one that is spending minutes on index
@@ -150,14 +173,14 @@ class FakeService:
             # already read: the state from before the change.
             while not self.hold.wait(0.02):
                 if cancel is not None and cancel.is_set():
-                    return Inventory(environment=PREFIX, backend="pip", rows=rows)
+                    return Inventory(environment=environment, backend="pip", rows=rows)
         if self.fail_after_listing:
             raise RuntimeError("the package index is unreachable")
 
         if on_row is not None:
             for row in rows:
                 on_row(row)
-        return Inventory(environment=PREFIX, backend="pip", rows=rows)
+        return Inventory(environment=self.listing_environment, backend="pip", rows=rows)
 
     def metadata_index(self, refresh: bool = False) -> None:
         return None
@@ -168,8 +191,16 @@ class FakeService:
     def backend_needs_elevation(self, action: PackageAction) -> bool:
         return self.needs_elevation
 
-    def backend_can_reach_targets(self, action: PackageAction) -> bool:
+    def backend_can_reach_targets(self, action: PackageAction, *, backend_name: str = "") -> bool:
+        if backend_name == "uv":
+            return self.uv_can_reach
         return self.can_reach_targets
+
+    def bootstrap_needs_elevation(self) -> bool:
+        return not self.writable
+
+    def invalidate_backend_state(self) -> None:
+        self.backend_state_invalidations += 1
 
     def plan_with_backend(self, name: str, action: PackageAction) -> CommandPlan:
         """The plan the real service builds for a pip fallback, faked."""
@@ -201,8 +232,52 @@ class FakeService:
             backend="pip",
         )
 
+    def required_backend_missing(self) -> str:
+        return self.missing_backend
+
+    def bootstrap_plans(self, missing: str, *, action: PackageAction) -> list[CommandPlan]:
+        """The setup commands, faked: install pip, then the tool itself."""
+        plans = [
+            CommandPlan(
+                argv=("python", "-m", "ensurepip", "--upgrade"),
+                action=action,
+                label="install pip",
+                backend="pip",
+            )
+        ]
+        if missing == "uv":
+            plans.append(
+                CommandPlan(
+                    argv=("python", "-m", "pip", "install", "--upgrade", "--", "uv"),
+                    action=action,
+                    label="install uv",
+                    backend="pip",
+                )
+            )
+        return plans
+
+    def plan_assuming_backend(self, name: str, action: PackageAction) -> CommandPlan:
+        return CommandPlan(
+            argv=(name, "pip", "install", "--upgrade", "--", *action.names),
+            action=action,
+            label=f"{name} upgrade",
+            backend=name,
+        )
+
     def action_for_uninstall_many(self, names) -> PackageAction:
         return PackageAction(kind=ActionKind.UNINSTALL, environment=PREFIX, names=tuple(names))
+
+    def action_for_upgrade(self, name: str, *, user: bool = False) -> PackageAction:
+        return PackageAction(kind=ActionKind.UPGRADE, environment=PREFIX, names=(name,), user=user)
+
+    def action_for_uninstall(self, name: str) -> PackageAction:
+        return PackageAction(kind=ActionKind.UNINSTALL, environment=PREFIX, names=(name,))
+
+    def action_for_upgrade_all(self, inventory, *, user: bool = False) -> PackageAction:
+        names = tuple(row.name for row in inventory.rows if row.is_outdated)
+        return PackageAction(
+            kind=ActionKind.UPGRADE_ALL, environment=PREFIX, names=names, user=user
+        )
 
     def action_for_restore(self, specs) -> PackageAction:
         return PackageAction(kind=ActionKind.INSTALL, environment=PREFIX, specs=tuple(specs))
@@ -216,6 +291,14 @@ class FakeService:
         elevated: bool = False,
     ) -> CommandResult:
         self.elevated_calls.append(elevated)
+        self.executed.append(plan.label)
+        if self.run_hold is not None:
+            # A held run stands in for a package-manager command that is
+            # spending its minutes downloading and installing. It stops the
+            # moment it is cancelled, like the real runner does.
+            while not self.run_hold.wait(0.02):
+                if cancel is not None and cancel.is_set():
+                    break
         for name in plan.action.names:
             if plan.action.kind is ActionKind.UNINSTALL:
                 self.versions.pop(name, None)
@@ -379,6 +462,114 @@ def test_a_successful_change_invalidates_the_shared_metadata_index(
     assert service.invalidations == 1
 
 
+def test_the_run_bar_fills_with_the_work_the_manager_reports(view: PackagesView) -> None:
+    """68% of the run means 68% of the bar - never a spinner, never a guess.
+
+    The bar is determinate from a run's first frame and fills only when a
+    real event justifies it: packages resolved, files fetched, the install
+    phase, success. pip's per-file percentage - the same number the log
+    shows - refines the file in flight, a redraw that goes backwards never
+    drags the bar with it, and the next queued command starts its own count
+    from zero.
+    """
+    view._show_run_progress("pip upgrade")
+    assert (view._run_progress.minimum(), view._run_progress.maximum()) == (0, 100)
+    assert view._run_progress.value() == 0
+
+    view._on_run_line("Collecting requests==2.32.3")
+    view._on_run_line("  Downloading requests-2.32.3-py3-none-any.whl (64 kB)")
+    assert view._run_progress.value() == 0  # the fetch started; nothing finished
+
+    # 68% of the one file the run has to fetch is 68% of the work span.
+    view._on_run_line("     \u2501\u2501\u2501\u2501  68%  3.5/5.1 MB")
+    assert view._run_progress.value() == 54
+
+    # A redraw that claims less than before never moves the bar backwards.
+    view._on_run_line("     \u2501  3%  0.2/5.1 MB")
+    assert view._run_progress.value() == 54
+
+    # A second fetch closes the first file. The "%2B" in the wheel's name is
+    # URL encoding, not a percentage - the line counts as the fetch it
+    # announces, never as a redraw of the one before it.
+    view._on_run_line("Downloading pkg-2.0%2B1-py3-none-any.whl (64 kB)")
+    assert view._run_progress.value() == 79  # first file done, cap one shy of the phase line
+
+    view._on_run_line("Installing collected packages: requests")
+    assert view._run_progress.value() == 80
+
+    view._on_run_line("Successfully installed requests-2.32.3")
+    assert view._run_progress.value() == 100
+
+    # The next queued plan starts its own count from zero again.
+    view._show_run_progress("uv upgrade")
+    assert view._run_progress.value() == 0
+
+
+def test_a_venv_creation_keeps_the_animated_bar(view: PackagesView) -> None:
+    """A tool that prints nothing countable gets the honest spinner.
+
+    Creating a virtual environment streams no per-file events; a determinate
+    bar would sit at zero for the whole run, insisting nothing was
+    happening. The animated bar is the truthful answer there.
+    """
+    view._show_run_progress("create virtual environment", determinate=False)
+    assert view._run_progress.maximum() == 0  # min == max: Qt's busy mode
+
+    view._on_run_line("creating the environment")
+    assert view._run_progress.maximum() == 0  # no line flipped it determinate
+
+
+def test_a_running_change_shows_the_progress_bar_until_it_ends(
+    qtbot, view: PackagesView, service: FakeService
+) -> None:
+    """The one sign of life a change gives with the log panel closed.
+
+    pip and uv stream lines but report no percentage a GUI could trust, so
+    the bar is the animated kind: it appears with the run, carries the
+    command's own label, and disappears when the run does - success,
+    failure and cancellation alike all end it the same way. (``isHidden``
+    rather than ``isVisible``: the view itself is never shown in tests.)
+    """
+    service.run_hold = threading.Event()
+
+    assert view._run_progress.isHidden()
+    assert view.confirm_and_run(_upgrade_request())
+    qtbot.waitUntil(lambda: not view._run_progress.isHidden(), timeout=5000)
+    assert view._run_progress.format() == "pip upgrade"
+
+    service.run_hold.set()
+    qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
+    assert not view._run_task
+
+
+def test_the_progress_bar_spans_a_queued_pair_of_plans(
+    qtbot, view: PackagesView, service: FakeService
+) -> None:
+    """A restore is one decision that can be two commands.
+
+    The bar must not blink away between them: the user approved a single
+    restore, and the batch is still running until the second plan ends.
+    """
+    service.run_hold = threading.Event()
+    plans = [
+        (service.plan(_upgrade_request()), False),
+        (
+            service.plan(
+                PackageAction(kind=ActionKind.INSTALL, environment=PREFIX, specs=("other==1.0",))
+            ),
+            False,
+        ),
+    ]
+
+    view.run_confirmed_plans(plans)
+    qtbot.waitUntil(lambda: not view._run_progress.isHidden(), timeout=5000)
+
+    service.run_hold.set()
+    qtbot.waitUntil(lambda: not view._run_task and not view._plan_queue, timeout=5000)
+    qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
+    assert service.versions["other"] == "1.0"
+
+
 # -- the two toolbar switches -------------------------------------------------
 #
 # "Show outdated packages" and "Show package sizes" existed in the settings page
@@ -523,6 +714,303 @@ def test_elevation_is_refused_before_confirming_when_the_os_cannot_run_it(
     assert not view.confirm_and_run(_upgrade_request())
     assert not view._run_task
     assert service.elevated_calls == []
+
+
+def test_a_missing_manager_is_installed_before_the_action_runs(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The report behind the feature: with uv chosen and not installed, the
+    action used to be an error (or a silent pip substitution).
+
+    Now the tool the user chose is installed first - pip through ensurepip,
+    uv as a package - and the action's own command follows through that tool.
+    One confirmation shows every command in the batch, so the approval covers
+    the whole sequence (SPEC section 11.7), and the queue runs them in order:
+    the action only starts once the manager it asked for exists.
+    """
+    service.missing_backend = "uv"
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            parent=None,
+        ) -> None:
+            recorded["plan"] = plan
+            recorded["bootstrap"] = bootstrap
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    notice = recorded["bootstrap"]
+    assert isinstance(notice, BootstrapNotice)
+    assert notice.backend == "uv"
+    assert len(notice.commands) == 2  # ensurepip, then pip install uv
+
+    qtbot.waitUntil(
+        lambda: service.executed == ["install pip", "install uv", "uv upgrade"],
+        timeout=5000,
+    )
+    qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
+    assert service.versions["requests"] == "2.32.0"
+
+
+def test_a_bootstrap_into_a_locked_environment_runs_elevated_or_is_refused(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """Installing a manager writes to the environment: locked means elevated.
+
+    Without the elevation path the batch would queue a doomed command -
+    pip cannot write a locked site-packages as a normal user, and a uv that
+    landed anywhere but the environment would never be found by the plan's
+    own first word. So the batch either runs with the OS's help or is
+    refused before anything starts, exactly like any other action.
+    """
+    service.missing_backend = "uv"
+    service.writable = False
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: False)
+
+    assert not view.confirm_and_run(_upgrade_request())
+    assert not view._run_task
+    assert service.executed == []
+
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: True)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            parent=None,
+        ) -> None:
+            recorded["elevation"] = elevation
+            recorded["bootstrap"] = bootstrap
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    assert isinstance(recorded["elevation"], ElevationNotice)
+    assert isinstance(recorded["bootstrap"], BootstrapNotice)
+    qtbot.waitUntil(lambda: len(service.elevated_calls) == 3, timeout=5000)
+    assert service.elevated_calls == [True, True, True]
+
+
+def test_a_missing_uv_that_cannot_reach_the_target_falls_back_to_pip(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The bootstrap honours the reachability rule, against uv's own semantics.
+
+    A uv that cannot change the package the interpreter imports would
+    "succeed" and change nothing - the exact defect the reachability check
+    exists for - so the shadowing copy is offered to pip instead, exactly as
+    it is when uv is installed.
+    """
+    service.missing_backend = "uv"
+    service.uv_can_reach = False
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            parent=None,
+        ) -> None:
+            recorded["fallback"] = fallback
+            recorded["bootstrap"] = bootstrap
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    assert isinstance(recorded["fallback"], FallbackNotice)
+    assert recorded["bootstrap"] is None
+    qtbot.waitUntil(lambda: service.executed == ["pip upgrade"], timeout=5000)
+
+
+def test_an_installed_name_the_validator_refuses_is_reported_not_raised(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """One odd row must not break the toolbar for the whole view.
+
+    The action builders re-validate names; the install and downgrade paths
+    already caught that, but an exception out of the upgrade click handler
+    is a crash where every sibling path shows a toast.
+    """
+    from pypackhub.core.validation import Reason, ValidationError
+
+    view.refresh()
+    qtbot.waitUntil(lambda: not view.is_busy, timeout=5000)
+    view.table.selectRow(0)
+
+    def refusing_upgrade(name: str, *, user: bool = False) -> PackageAction:
+        raise ValidationError(Reason.INVALID_NAME, "not a valid name", value=name)
+
+    monkeypatch.setattr(service, "action_for_upgrade", refusing_upgrade)
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    view.upgrade_button.click()
+
+    assert not view._run_task
+    assert messages
+
+
+def test_a_refresh_that_outlives_an_environment_switch_is_not_applied(
+    qtbot, view: PackagesView, service: FakeService
+) -> None:
+    """The answer of one environment must never paint another.
+
+    A pass that listed environment A finishes after the user switched to B;
+    without the identity checks it repainted A's rows under B's header. The
+    fake labels its listings with the environment it is asked about, so the
+    two passes are distinguishable by more than their content.
+    """
+    service.hold = threading.Event()
+    other = PREFIX.parent / "other-env"
+    view.refresh()
+    qtbot.waitUntil(lambda: len(service.listings) == 1, timeout=5000)
+
+    # From here the fake lists as the *new* environment; the pass already
+    # running captured A's label at its start.
+    service.listing_environment = other
+    view.set_environment(other)
+
+    service.hold.set()
+    qtbot.waitUntil(lambda: not view.is_busy, timeout=5000)
+
+    # What is on screen is the new environment's answer. Had the stale pass
+    # been applied, its listing - labelled with the old environment - would
+    # be the one in the view instead.
+    assert view._inventory is not None
+    assert view._inventory.environment == other
+
+
+def test_the_bootstrap_invalidates_what_was_probed_about_the_managers(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """After the batch installs a manager, the next probe must not be stale."""
+    service.missing_backend = "uv"
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            parent=None,
+        ) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
+    assert service.backend_state_invalidations >= 1
+
+
+def test_declining_the_bootstrap_offer_installs_nothing(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    service.missing_backend = "uv"
+
+    class RefusingConfirmation:
+        confirmed = False
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            parent=None,
+        ) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", RefusingConfirmation)
+
+    assert not view.confirm_and_run(_upgrade_request())
+    assert not view._run_task
+    assert service.executed == []
+
+
+def test_the_confirmation_dialog_explains_what_the_bootstrap_does(
+    qapp: QApplication, shell: WindowShell
+) -> None:
+    """The tool's absence, what installs it, and that the batch is one approval."""
+    del qapp
+    plan = CommandPlan(
+        argv=("uv", "pip", "install", "--upgrade", "--", "pip"),
+        action=_upgrade_request(),
+        label="uv upgrade",
+        backend="uv",
+    )
+
+    dialog = ConfirmationDialog(
+        plan=plan,
+        policy=_ok_policy(),
+        translator=shell.translator,
+        bootstrap=BootstrapNotice(backend="uv", commands=("python -m ensurepip --upgrade",)),
+    )
+
+    assert dialog.accepts_bootstrap
+    assert not dialog.bootstrap_label.isHidden()
+    assert EN_TABLE[TranslationKey.CONFIRM_BOOTSTRAP_TITLE] in dialog.bootstrap_text
+    assert "uv" in dialog.bootstrap_text
+    # The preview carries the installing commands above the action's own one.
+    assert "python -m ensurepip --upgrade" in dialog.command_text
+    assert "uv pip install --upgrade -- pip" in dialog.command_text
+    assert (
+        dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).text()
+        == EN_TABLE[TranslationKey.CONFIRM_BOOTSTRAP_BUTTON]
+    )
 
 
 def test_an_action_the_backend_cannot_reach_is_offered_to_pip_instead(
