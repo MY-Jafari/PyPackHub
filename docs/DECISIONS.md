@@ -700,6 +700,21 @@ carry their direction marks, and the invisible ones are escapes rather than
 raw characters - so the source stays reviewable and the rendering stays
 right-to-left.
 
+**A test that opens a modal blocks the runner.** The release workflow's
+verify jobs sat in ``pytest`` for hours - on Windows, macOS and Linux at
+once - because a UI test selected a package manager that was missing on
+the runner, and the settings page answers a missing manager with a
+*modal* question. A real question in a test waits for a click that never
+comes, so the job hangs until the platform's six-hour limit; the developer
+whose machine had the tool installed never saw it at all. The rule the
+incident makes plain: a test must not depend on what happens to be
+installed on the machine it runs on, and it must never open a dialog that
+waits. ``tests/ui/conftest.py`` removes both - the managers count as
+installed and the modal helper answers itself - while a test that is
+*about* the question still patches it and keeps its own meaning. The
+generalisation: the suite's environment is part of its input, and the only
+way to keep a green run green is to take that input out of the picture.
+
 **Consciously deferred.** Channel search for conda (the search view stays
 PyPI-based; conda lookups there are advisory the same way every listing-based
 check is), conda environment *creation* in the environments view, binding a

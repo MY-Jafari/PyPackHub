@@ -167,5 +167,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The remaining `S112` bandit finding, and the `B604` false positive on
   `MainWindow(shell=...)` (suppressed on that line with the reason). `ruff`,
   `black`, `mypy`, `bandit` and the banned-pattern scan are all clean again.
+- The UI test-suite no longer depends on what is installed on the machine
+  that runs it. The settings page asks a *modal* question when the chosen
+  package manager is missing, so a test that selected a manager which
+  happened to be absent opened a real dialog and blocked - the release
+  workflow's verify jobs sat in `pytest` for hours instead of failing. A
+  developer with `uv` installed and a CI runner without it ran different
+  code. `tests/ui/conftest.py` now makes every manager count as installed
+  and answers the modal helper itself, so a test can never freeze a
+  runner; a test that cares about the question still patches it.
+- `certifi` is pinned to `2026.10.19` in both lock files: `PYSEC-2026-4320`
+  affects `2026.7.22`, and the weekly dependency audit fails on a pinned
+  package with a known advisory.
 
 [0.1.1]: https://github.com/MY-Jafari/PyPackHub/compare/v0.1.0...v0.1.1
