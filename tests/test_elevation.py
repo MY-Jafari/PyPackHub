@@ -405,12 +405,20 @@ def test_pkexec_receives_the_command_as_an_argument_list(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin", reason="macOS has no pkexec; the runner refuses there"
+)
 def test_pkexec_streams_its_output_through_the_runners_pipes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """polkit carries pipes, so an elevated run there streams its real
     output exactly like any other command - the streaming contract is not
-    a Windows-only promise."""
+    a Windows-only promise.
+
+    The platform guard is not decoration: on macOS the runner answers the
+    elevation request with a refusal *before* it would reach for pkexec,
+    so without the skip the test measured a code path that never runs.
+    """
     executable = tmp_path / "fake-manager"
     executable.write_text("", encoding="utf-8")
 

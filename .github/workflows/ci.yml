@@ -1,7 +1,16 @@
 name: CI
 
+# The matrix below is expensive to run: the macOS legs are billed at ten
+# times their wall-clock time, and a tag push used to pay that price twice
+# - once here, once in the Release workflow, whose verify jobs test the
+# very same commit on the very same three operating systems before
+# anything is published. So this workflow runs on the branch work happens
+# on (main and its pull requests), and a tag push is left to the Release
+# and Security workflows, which cover it completely.
+
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
