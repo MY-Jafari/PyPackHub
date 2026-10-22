@@ -27,6 +27,7 @@ from pypackhub.core.backends.base import (
     UnsupportedBackendError,
 )
 from pypackhub.core.platform_guard import InterpreterFacts
+from pypackhub.core.platform_guard import inspect as inspect_prefix
 from pypackhub.core.runner import CommandFailedError, ExecutableNotFoundError, run
 
 __all__ = ["PipBackend", "find_pip"]
@@ -124,6 +125,19 @@ class PipBackend(Backend):
             return find_pip(self._prefix)
         except UnsupportedBackendError as error:
             raise UnsupportedBackendError("pip is not available on this system") from error
+
+    def supports_environment(self, path: Path) -> bool:
+        """pip needs an interpreter to run, and a project folder has none.
+
+        Without one, the plan would fall back to a ``pip`` from the search
+        path - a pip that belongs to some *other* prefix - and install into
+        the wrong place while the confirmation showed an honest-looking
+        command. The factory asks before handing the backend out, so this
+        never gets the chance to happen.
+        """
+        if self._python is not None:
+            return True
+        return inspect_prefix(path).executable is not None
 
     # ------------------------------------------------------------------
     # Changing actions

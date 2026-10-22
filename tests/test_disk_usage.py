@@ -8,12 +8,16 @@ questions the analysis asks of a real machine.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pypackhub.core.disk_usage as disk_usage_module
 from pypackhub.core.disk_usage import (
     analyse_disk_usage,
+    conda_pkgs_dir,
     directory_size,
     pip_cache_dir,
+    poetry_cache_dir,
     uv_cache_dir,
 )
 
@@ -94,11 +98,16 @@ def test_cache_directories_follow_the_tools_and_the_environment(
 def test_a_cache_that_was_never_created_is_a_fact_not_an_error(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PIP_CACHE_DIR", str(tmp_path / "nothing-here"))
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "nothing-either"))
+    monkeypatch.delenv("CONDA_PKGS_DIRS", raising=False)
+    monkeypatch.delenv("CONDA_ROOT", raising=False)
 
     usage = analyse_disk_usage(_environment(tmp_path))
     by_kind = {cache.kind: cache for cache in usage.caches}
 
-    assert set(by_kind) == {"pip", "uv"}
+    # poetry's platform default is always locatable; conda's is only reported
+    # when conda's own variables name it, so neither machine luck nor a
+    # guess decides what the panel lists.
+    assert set(by_kind) == {"pip", "uv", "poetry"}
     assert by_kind["pip"].exists is False
     assert by_kind["pip"].size_bytes == 0
 
@@ -125,3 +134,53 @@ def test_the_cache_locations_match_the_platform_conventions(monkeypatch) -> None
 
     assert pip_cache_dir().name == "Cache" or pip_cache_dir().name == "pip"
     assert uv_cache_dir().name == "cache" or uv_cache_dir().name == "uv"
+
+
+# -- conda's and poetry's caches -------------------------------------------------
+
+
+def test_condas_cache_honours_condas_own_variables(tmp_path: Path, monkeypatch) -> None:
+    """``CONDA_PKGS_DIRS`` is a path list - the first entry is the one conda
+    downloads into - and ``CONDA_ROOT`` names the installation whose ``pkgs``
+    directory it is."""
+    monkeypatch.setenv(
+        "CONDA_PKGS_DIRS", str(tmp_path / "first") + os.pathsep + str(tmp_path / "second")
+    )
+    assert conda_pkgs_dir() == tmp_path / "first"
+
+    monkeypatch.setenv("CONDA_PKGS_DIRS", "")
+    monkeypatch.setenv("CONDA_ROOT", str(tmp_path / "conda-root"))
+    assert conda_pkgs_dir() == tmp_path / "conda-root" / "pkgs"
+
+
+def test_condas_cache_is_not_guessed_at(tmp_path: Path, monkeypatch) -> None:
+    """No variables, no number: a guessed cache path could measure a
+    directory that is not conda's at all."""
+    monkeypatch.delenv("CONDA_PKGS_DIRS", raising=False)
+    monkeypatch.delenv("CONDA_ROOT", raising=False)
+
+    assert conda_pkgs_dir() is None
+
+
+def test_poetrys_cache_follows_the_platform(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(disk_usage_module.sys, "platform", "darwin")
+    assert poetry_cache_dir() == Path.home() / "Library" / "Caches" / "pypoetry"
+
+    monkeypatch.setattr(disk_usage_module.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert poetry_cache_dir() == tmp_path / "xdg" / "pypoetry"
+
+
+def test_a_locatable_conda_cache_is_measured(tmp_path: Path, monkeypatch) -> None:
+    """When conda's variables name a real directory, the panel says what it
+    holds - the package cache is where conda's bytes actually pile up."""
+    cache = tmp_path / "conda-pkgs"
+    cache.mkdir()
+    (cache / "numpy-1.26.0.tar.bz2").write_bytes(b"x" * 2048)
+    monkeypatch.setenv("CONDA_PKGS_DIRS", str(cache))
+
+    usage = analyse_disk_usage(_environment(tmp_path))
+    by_kind = {entry.kind: entry for entry in usage.caches}
+
+    assert by_kind["conda"].exists is True
+    assert by_kind["conda"].size_bytes == 2048

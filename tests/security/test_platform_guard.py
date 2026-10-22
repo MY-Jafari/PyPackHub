@@ -179,3 +179,101 @@ def test_alias_stub_target_is_never_modifiable(
 
 def test_detect_kind_of_a_plain_directory_is_system(tmp_path: Path) -> None:
     assert detect_kind(tmp_path) is EnvironmentKind.SYSTEM
+
+
+# -- project folders: the poetry / pipenv / pdm locations ------------------------
+
+
+def make_poetry_project(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "pyproject.toml").write_text("[tool.poetry]\nname = 'x'\n", encoding="utf-8")
+    return path
+
+
+def make_pdm_project(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    (path / "pdm.lock").write_text("", encoding="utf-8")
+    return path
+
+
+def make_pipenv_project(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "Pipfile").write_text("[packages]\n", encoding="utf-8")
+    return path
+
+
+def test_a_poetry_project_is_a_project_location(tmp_path: Path) -> None:
+    project = make_poetry_project(tmp_path / "proj")
+
+    assert detect_kind(project) is EnvironmentKind.PROJECT
+
+
+def test_a_pdm_project_is_a_project_location(tmp_path: Path) -> None:
+    project = make_pdm_project(tmp_path / "proj")
+
+    assert detect_kind(project) is EnvironmentKind.PROJECT
+
+
+def test_a_pipfile_is_pipenvs_project_marker(tmp_path: Path) -> None:
+    project = make_pipenv_project(tmp_path / "proj")
+
+    assert detect_kind(project) is EnvironmentKind.PROJECT
+
+
+def test_a_plain_pyproject_is_not_a_project(tmp_path: Path) -> None:
+    """A ``pyproject.toml`` without a tool's own markers is a library or an
+    app, and none of the project tools would know what to do with it."""
+    project = tmp_path / "lib"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+
+    assert detect_kind(project) is EnvironmentKind.SYSTEM
+
+
+def test_an_environment_marker_beats_a_project_marker(tmp_path: Path) -> None:
+    """The venv inside a project is a different location than the project."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    make_poetry_project(project)
+    venv = project / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+
+    assert detect_kind(venv) is EnvironmentKind.VENV
+    assert detect_kind(project) is EnvironmentKind.PROJECT
+
+
+def test_a_project_has_no_interpreter_at_its_root(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    make_poetry_project(project)
+
+    facts = inspect(project)
+
+    assert facts.kind is EnvironmentKind.PROJECT
+    assert facts.executable is None
+
+
+def test_a_project_is_allowed_and_never_warned_about(tmp_path: Path) -> None:
+    """The tools record changes in the project's files; the policy says that
+    instead of warning about a base interpreter the location is not."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    make_poetry_project(project)
+
+    policy = modification_policy(inspect(project))
+
+    assert policy.allowed is True
+    assert policy.reason_code == "target.project"
+    assert policy.severity is Severity.OK
+
+
+def test_a_project_is_not_isolated_in_the_policy_sense(tmp_path: Path) -> None:
+    """The project's files are shared state with the whole team, so the
+    "isolated" shortcut does not apply."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    make_poetry_project(project)
+
+    assert inspect(project).is_isolated is False

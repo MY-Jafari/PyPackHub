@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+import pypackhub.core.inventory as inventory_module
 from pypackhub.core.backends.base import (
     Backend,
     BackendCapability,
@@ -203,3 +204,54 @@ def test_a_broken_listing_does_not_hide_the_working_one(
 
     assert inventory.row("wheel").installed == "0.45.0"
     assert "pip" in inventory.error
+
+
+def test_a_conda_environment_merges_the_conda_family_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conda environment's own listing is the complete one - conda sees the
+    conda-installed packages pip cannot - so the automatic order reaches for
+    the conda family, and the merge deduplicates mamba's and conda's identical
+    answers into one row."""
+    conda = tmp_path / "conda-env"
+    (conda / "conda-meta").mkdir(parents=True)
+
+    install_backends(
+        monkeypatch,
+        mamba=ListingBackend("mamba", {"numpy": "1.26.0", "flask": "3.0.0"}),
+        conda=ListingBackend("conda", {"numpy": "1.26.0", "flask": "3.0.0"}),
+        uv=ListingBackend("uv", {"flask": "3.0.0"}),
+        pip=ListingBackend("pip", {"flask": "3.0.0"}),
+    )
+
+    inventory = InventoryService(prefix=conda).list()
+
+    assert inventory.row("numpy").installed == "1.26.0"
+    assert inventory.row("flask").installed == "3.0.0"
+    # numpy appears once even though two backends reported it.
+    names = [row.name for row in inventory.rows]
+    assert names.count("numpy") == 1
+
+
+def test_a_poetry_project_lists_through_poetry_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project folder's own tool is the only preference: pip has no
+    interpreter to run there, and the merge never asks it to."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[tool.poetry]\n", encoding="utf-8")
+
+    asked: list[str] = []
+
+    def make(name, prefix, interpreter):
+        asked.append(name)
+        return ListingBackend("poetry", {"black": "24.3.0"})
+
+    monkeypatch.setattr(inventory_module, "_make_backend", make)
+
+    inventory = InventoryService(prefix=project).list()
+
+    assert inventory.row("black").installed == "24.3.0"
+    assert inventory.row("black").backend == "poetry"
+    assert set(asked) == {"poetry"}

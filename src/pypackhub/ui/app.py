@@ -81,6 +81,7 @@ def build_context(
     *,
     prefer_uv: bool = True,
     package_manager: str = "auto",
+    registered_environments: tuple[str, ...] = (),
     index_url: str = "",
     extra_index_urls: tuple[str, ...] = (),
     trusted_hosts: tuple[str, ...] = (),
@@ -93,12 +94,16 @@ def build_context(
     for an environment, because it is dramatically faster, and every action still
     goes through the same hardened runner either way. The index settings come
     from the shell's persisted settings: they decide which index the version
-    lookups ask and which index flags every installing command carries.
+    lookups ask and which index flags every installing command carries. The
+    registered folders are the ones the user pointed the application at on
+    the environments page: a conda environment outside the standard roots, or
+    a poetry/pipenv/pdm project.
     """
     return UiContext(
         provider=DefaultInventoryProvider(
             prefer_uv=prefer_uv,
             package_manager=package_manager,
+            registered_environments=tuple(Path(path) for path in registered_environments),
             index_url=index_url,
             extra_index_urls=extra_index_urls,
             trusted_hosts=trusted_hosts,
@@ -128,6 +133,7 @@ def build_window(
         context=context
         or build_context(
             package_manager=settings.package_manager,
+            registered_environments=settings.registered_environments,
             index_url=settings.pypi_index_url,
             extra_index_urls=tuple(settings.extra_index_urls),
             trusted_hosts=tuple(settings.trusted_hosts),

@@ -51,6 +51,7 @@ class DefaultInventoryProvider:
         prefer_uv: bool = True,
         search_working_directory: bool = True,
         package_manager: str = "auto",
+        registered_environments: Sequence[Path] = (),
         index_url: str = "",
         extra_index_urls: Sequence[str] = (),
         trusted_hosts: Sequence[str] = (),
@@ -60,6 +61,7 @@ class DefaultInventoryProvider:
         self._prefer_uv = prefer_uv
         self._search_working_directory = search_working_directory
         self._package_manager = package_manager
+        self._registered: tuple[Path, ...] = tuple(registered_environments)
         self.set_index(
             index_url=index_url,
             extra_index_urls=extra_index_urls,
@@ -75,6 +77,15 @@ class DefaultInventoryProvider:
         manager must not quietly turn environment discovery off as a side effect.
         """
         self._package_manager = package_manager
+
+    def set_registered_environments(self, registered: Sequence[Path]) -> None:
+        """Record the folders the user pointed the application at.
+
+        The services are not keyed by these folders, so unlike the package
+        manager or the index this change costs nothing to apply; the next
+        discovery pass simply offers the new folder as well.
+        """
+        self._registered = tuple(registered)
 
     def set_index(
         self,
@@ -130,13 +141,15 @@ class DefaultInventoryProvider:
         The discovery is intentionally shallow (it looks at the immediate children
         of a few well-known directories) because a full scan is Phase 3 work. The
         working directory is added because a developer's ``.venv`` next to the
-        project they opened is the environment they almost always mean.
+        project they opened is the environment they almost always mean, and the
+        registered folders are added because they are the one way to reach a
+        conda environment outside the roots or a poetry/pipenv/pdm project.
         """
         roots: list[Path] = list(DEFAULT_SEARCH_ROOTS)
         if self._search_working_directory:
             roots.append(Path.cwd())
 
-        listing = detected_environments(tuple(roots))
+        listing = detected_environments(tuple(roots), registered=self._registered)
 
         prefixes: list[Path] = []
         seen: set[Path] = set()
@@ -160,9 +173,11 @@ class UiContext:
         tasks: TaskManager | None = None,
         default_environment: Path | None = None,
         package_manager: str = "auto",
+        registered_environments: Sequence[Path] = (),
     ) -> None:
         self.provider: InventoryProvider = provider or DefaultInventoryProvider(
-            package_manager=package_manager
+            package_manager=package_manager,
+            registered_environments=registered_environments,
         )
         self.tasks: TaskManager = tasks or TaskManager()
         self._default = (
@@ -220,6 +235,18 @@ class UiContext:
                 cache_max_versions=cache_max_versions,
             )
         self._services.clear()
+
+    def set_registered_environments(self, registered: Sequence[Path]) -> None:
+        """Point the provider at the folders the user registered.
+
+        Same contract as :meth:`set_package_manager`: the provider is updated
+        in place and nothing is thrown away, because the services are not
+        keyed by the registered folders - only the next discovery pass sees
+        the change.
+        """
+        update = getattr(self.provider, "set_registered_environments", None)
+        if callable(update):
+            update(registered)
 
     def set_default_environment(self, prefix: Path) -> None:
         self._default = Path(prefix).resolve()

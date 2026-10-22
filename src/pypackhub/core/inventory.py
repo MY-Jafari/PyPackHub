@@ -49,9 +49,15 @@ from pypackhub.core.backends.base import (
     PackageAction,
     PackageListing,
     UnsupportedBackendError,
+    script_path_in_prefix,
 )
-from pypackhub.core.backends.pip import PipBackend
-from pypackhub.core.backends.uv import UvBackend, uv_path_in_prefix
+from pypackhub.core.backends.conda import CondaBackend, find_conda
+from pypackhub.core.backends.pdm import PdmBackend, find_pdm
+from pypackhub.core.backends.pip import PipBackend, find_pip
+from pypackhub.core.backends.pipenv import PipenvBackend, find_pipenv
+from pypackhub.core.backends.pipx import PipxBackend, find_pipx
+from pypackhub.core.backends.poetry import PoetryBackend, find_poetry
+from pypackhub.core.backends.uv import UvBackend, find_uv, uv_path_in_prefix
 from pypackhub.core.deps import RequirementConflict, incoming_conflicts
 from pypackhub.core.metadata import (
     InstalledMetadataIndex,
@@ -60,11 +66,14 @@ from pypackhub.core.metadata import (
     site_packages_writable,
 )
 from pypackhub.core.platform_guard import (
+    EnvironmentKind,
     InterpreterFacts,
     ModificationPolicy,
     current_prefix,
+    detect_kind,
     inspect,
     modification_policy,
+    project_tool,
 )
 from pypackhub.core.runner import CommandResult, ExecutableNotFoundError, run
 from pypackhub.core.trust import TyposquatWarning, bundled_catalog
@@ -236,6 +245,102 @@ def _row_from_package(package: InstalledPackage) -> PackageRow:
 #: because SPEC section 2 asks for it to be preferred when it is present.
 PREFERRED_BACKENDS: Final = ("uv", "pip")
 
+#: Every backend name the factory knows. The settings page validates its
+#: package-manager value against the same set, so a name that cannot be built
+#: can never be persisted in the first place.
+KNOWN_BACKENDS: Final = (
+    "uv",
+    "pip",
+    "conda",
+    "mamba",
+    "poetry",
+    "pipx",
+    "pipenv",
+    "pdm",
+)
+
+#: The managers that can be installed *by pip* when the user forces one that
+#: is missing. conda and mamba are deliberately absent: they are not PyPI
+#: packages, so the bootstrap flow refuses them with an explanation instead
+#: of offering an install that could never work.
+_PIP_INSTALLABLE_TOOLS: Final = ("poetry", "pipx", "pipenv", "pdm")
+
+#: Constructors for those tools, for the bootstrap flow's pre-install plan.
+#: Each takes ``executable=`` - the script path the queued install is about
+#: to fill - because the plan exists *before* the tool does.
+_TOOL_BACKENDS: Final[dict[str, Callable[..., Backend]]] = {
+    "poetry": PoetryBackend,
+    "pipx": PipxBackend,
+    "pipenv": PipenvBackend,
+    "pdm": PdmBackend,
+}
+
+#: How to find each manager's executable, by name. The probes are resolution
+#: only - a PATH walk plus the prefix locations each backend documents - with
+#: nothing spawned, so asking is cheap enough for the settings page.
+_MANAGER_FINDERS: Final[dict[str, Callable[[], Path]]] = {
+    "pip": lambda: find_pip(None),
+    "uv": lambda: find_uv(None),
+    "conda": lambda: find_conda("conda"),
+    "mamba": lambda: find_conda("mamba"),
+    "poetry": find_poetry,
+    "pipx": find_pipx,
+    "pipenv": find_pipenv,
+    "pdm": find_pdm,
+}
+
+
+def manager_available(name: str) -> bool:
+    """Whether *name*'s executable is installed on this machine.
+
+    The settings page asks this the moment a manager is chosen, so the user
+    learns the state of their choice right there instead of at the next
+    upgrade. The answer says the tool exists - whether a given environment
+    can be driven by it is a different question, answered per location by
+    the backend's own ``supports_environment`` when an action is planned.
+    """
+    finder = _MANAGER_FINDERS.get(name)
+    if finder is None:
+        return False
+    try:
+        finder()
+    except (UnsupportedBackendError, OSError):
+        return False
+    return True
+
+
+#: The managers this application offers to remove: exactly the ones pip can
+#: install, because the tool that put a manager somewhere is the tool that
+#: can take it back out. pip itself is absent on purpose - it is the
+#: baseline every bootstrap path starts from, and a page offering to remove
+#: the floor beneath the environment is lying about the consequences.
+#: conda and mamba are absent because they are not pip packages: whatever
+#: installed them was not pip, and what removes them must not be either.
+_REMOVABLE_MANAGERS: Final = ("uv", "poetry", "pipx", "pipenv", "pdm")
+
+
+def manager_removable(name: str) -> bool:
+    """Whether *name* is a manager this application offers to remove."""
+    return name in _REMOVABLE_MANAGERS
+
+
+#: The managers this application can install by itself: the ones the pip
+#: bootstrap path can reach. conda and mamba are absent because they are not
+#: pip packages - the settings page uses this answer to never ask "install
+#: it now?" about a manager whose every answer would be a refusal, and to
+#: say where the manager comes from instead.
+_INSTALLABLE_MANAGERS: Final = ("uv", "pip", "poetry", "pipx", "pipenv", "pdm")
+
+
+def manager_installable(name: str) -> bool:
+    """Whether *name* is a manager this application can install by itself.
+
+    Unknown names answer False: a page that only asks questions it can act
+    on never offers an install it cannot perform.
+    """
+    return name in _INSTALLABLE_MANAGERS
+
+
 #: How many package-index lookups run at once. The index has no batch endpoint,
 #: so refreshing a 200-package environment is 200 round trips; eight at a time
 #: turns that from "minutes" into "a few seconds" without opening a socket per
@@ -248,7 +353,42 @@ def _make_backend(name: str, prefix: Path, interpreter: Path | None) -> Backend:
         return UvBackend(python=interpreter)
     if name == "pip":
         return PipBackend(prefix=prefix, python=interpreter)
+    if name == "conda":
+        return CondaBackend(tool="conda")
+    if name == "mamba":
+        return CondaBackend(tool="mamba")
+    if name == "poetry":
+        return PoetryBackend()
+    if name == "pipx":
+        return PipxBackend()
+    if name == "pipenv":
+        return PipenvBackend()
+    if name == "pdm":
+        return PdmBackend()
     raise ValueError(f"unknown backend {name!r}")
+
+
+def _preference_order(prefix: Path, prefer_uv: bool) -> tuple[str, ...]:
+    """Which backends to try for *prefix*, in order, when the user said "auto".
+
+    The order is the environment's own answer, not a fixed list. A poetry,
+    pipenv or pdm project is driven by the tool that owns its files and by
+    nothing else - pip has no interpreter to run there and the project tools
+    cannot read each other's manifests. A conda environment prefers the
+    conda family first, because conda's own listing is the only complete one
+    (pip cannot see conda's metadata), with the pip family behind it for the
+    case where neither conda nor mamba is installed. Virtual environments and
+    base interpreters keep the documented uv-first order.
+    """
+    kind = detect_kind(prefix)
+    base = ("uv", "pip") if prefer_uv else ("pip",)
+
+    if kind is EnvironmentKind.PROJECT:
+        tool = project_tool(prefix)
+        return (tool,) if tool else ()
+    if kind is EnvironmentKind.CONDA:
+        return ("mamba", "conda", *base)
+    return base
 
 
 #: What a manager's own error says when the manager itself is missing rather
@@ -260,6 +400,12 @@ _ABSENCE_MARKERS: Final = (
     "no module named pip",  # python -m pip without the pip module
     "pip could not be found",  # pip's probe message
     "uv could not be found",  # uv's probe message
+    "conda could not be found",  # the conda-family probes share the shape
+    "mamba could not be found",
+    "poetry could not be found",
+    "pipx could not be found",
+    "pipenv could not be found",
+    "pdm could not be found",
     "is not available on this system",  # both probes' wrapped message
 )
 
@@ -276,6 +422,14 @@ def _default_index() -> PackageIndex:
 
     return PyPIClient()
 
+
+#: The backends that read pip's index flags. ``--index-url`` and friends are
+#: pip's (and uv's) vocabulary; conda has channels, poetry and pdm have
+#: sources, and carrying a pip flag into their commands would produce a
+#: command the user confirmed that the tool itself refuses to parse. The
+#: index settings still govern the *lookups* for every backend; only the
+#: command-line spelling is per-manager.
+_PIP_INDEX_FLAG_BACKENDS: Final = frozenset({"pip", "uv"})
 
 #: The action kinds whose commands resolve packages against an index, and are
 #: therefore the ones that carry the configured index flags.
@@ -296,9 +450,12 @@ def build_backend(
     ``name`` requests a specific backend; it still has to be available on this
     machine, and the preference order is then tried as a fallback. Availability
     is decided by resolving the executable, so a backend that is not installed
-    never claims a job it cannot run. With ``require=False`` an unavailable
-    backend is reported as ``None`` so the UI can say "no package manager found"
-    instead of failing later.
+    never claims a job it cannot run. A backend that cannot act on this kind of
+    location - conda pointed at a venv, poetry pointed at an environment - is
+    skipped the same way, so a manager forced in the settings never runs
+    against a place it would misread or corrupt. With ``require=False`` an
+    unavailable backend is reported as ``None`` so the UI can say "no package
+    manager found" instead of failing later.
     """
     interpreter = inspect(prefix).executable
     order = ([name] if name else []) + [candidate for candidate in prefer if candidate != name]
@@ -308,6 +465,8 @@ def build_backend(
             backend = _make_backend(candidate, prefix, interpreter)
             backend.executable_path()
         except (UnsupportedBackendError, ValueError, OSError):
+            continue
+        if not backend.supports_environment(prefix):
             continue
         return backend
 
@@ -402,7 +561,11 @@ class InventoryService:
         index_args: Sequence[str] = (),
     ) -> None:
         self._prefix = Path(prefix).resolve() if prefix is not None else current_prefix()
-        self._prefer: tuple[str, ...] = ("uv", "pip") if prefer_uv else ("pip",)
+        # The preference order is the environment's own answer (see
+        # :func:`_preference_order`): a conda environment reaches for the conda
+        # family, a project folder for the tool that owns its files, and only a
+        # plain interpreter keeps the fixed uv-first list.
+        self._prefer: tuple[str, ...] = _preference_order(self._prefix, prefer_uv)
         self._backend = backend
         self._backend_name = backend_name
         # The client is built eagerly rather than lazily: two worker threads
@@ -446,8 +609,22 @@ class InventoryService:
         return self._facts
 
     def policy(self) -> ModificationPolicy:
-        """Whether this environment may be modified, and how loudly to warn."""
-        return modification_policy(self.facts)
+        """Whether this environment may be modified, and how loudly to warn.
+
+        The backend decides: most only need the platform guard's answer for
+        the selected prefix, but a backend whose commands do not touch that
+        prefix at all - pipx, whose applications live in its own home -
+        answers for the place its commands actually write.
+
+        When *no* manager resolves at all - the exact state the bootstrap
+        flow exists to fix - the platform guard still answers for the
+        prefix, so the offer to install one must not crash on the way to
+        being made.
+        """
+        try:
+            return self.backend.policy_for(self.facts)
+        except UnsupportedBackendError:
+            return modification_policy(self.facts)
 
     # -- listing --------------------------------------------------------
 
@@ -571,6 +748,12 @@ class InventoryService:
             backend = _make_backend(name, self._prefix, facts.executable)
             backend.executable_path()
         except (UnsupportedBackendError, ValueError, OSError):
+            return None
+        if not backend.supports_environment(self._prefix):
+            # The preference order already keeps managers away from locations
+            # they do not own; this is the same refusal for any caller that
+            # reaches here by another route, so a mismatched pair can never
+            # run even once by accident.
             return None
 
         try:
@@ -750,8 +933,14 @@ class InventoryService:
         dialog shows the result because it is derived from this same ``argv``
         (SPEC section 11.7). No flags, no change: the public index needs
         nothing said out loud.
+
+        Only the backends that speak pip's flag vocabulary carry them; the
+        project tools and conda would refuse the command outright, and a
+        confirmed command that cannot parse is worse than no command.
         """
         if not self._index_args or plan.action.kind not in _INSTALLING_KINDS:
+            return plan
+        if plan.backend not in _PIP_INDEX_FLAG_BACKENDS:
             return plan
 
         argv = plan.argv
@@ -862,10 +1051,21 @@ class InventoryService:
         pip is set up through ``ensurepip`` - the wheel Python ships with,
         no network needed. uv is a package on the index, so it is installed
         with pip - and pip itself is set up first when the interpreter does
-        not have it. The plans carry *action* because they exist for it: the
+        not have it. poetry, pipx, pipenv and pdm are index packages too, so
+        the same one-command bootstrap applies to them. conda and mamba are
+        the exception: they are not pip-installable, and offering an install
+        that cannot work would be a confirmation with a lie in it, so they
+        are refused with an explanation of where they come from instead.
+        The plans carry *action* because they exist for it: the
         confirmation explains that, the history records it, and the queue the
         UI builds runs them before the action's own command.
         """
+        if missing in ("conda", "mamba"):
+            raise UnsupportedBackendError(
+                f"{missing} is not a pip package; install it from its own distribution "
+                "(docs.conda.io for conda, mamba.readthedocs.io for mamba)"
+            )
+
         executable = self.facts.executable
         if executable is None:
             # Without an interpreter there is nothing to bootstrap and no
@@ -877,7 +1077,7 @@ class InventoryService:
         plans: _list[CommandPlan] = []
         if missing == "pip":
             plans.append(self._ensurepip_plan(action))
-        elif missing == "uv":
+        elif missing == "uv" or missing in _PIP_INSTALLABLE_TOOLS:
             if not self._interpreter_has_pip():
                 plans.append(self._ensurepip_plan(action))
             plans.append(
@@ -889,10 +1089,10 @@ class InventoryService:
                         "install",
                         "--upgrade",
                         "--",
-                        "uv",
+                        missing,
                     ),
                     action=action,
-                    label="install uv",
+                    label=f"install {missing}",
                     backend="pip",
                 )
             )
@@ -928,6 +1128,27 @@ class InventoryService:
         succeeded - the queue the UI builds guarantees the order - and the
         hardened runner resolves that first word like any other executable.
         """
+        backend = self._backend_for_assumption(name)
+        if not backend.capability.supports(action.kind):
+            raise UnsupportedBackendError(f"{name} cannot perform {action.kind.value}")
+        return self._with_index_args(backend.plan(action))
+
+    def elevation_assuming_backend(self, name: str, action: PackageAction) -> bool:
+        """Whether *action* needs the OS's help once *name* is installed.
+
+        The bootstrap batch's last step runs through the manager the earlier
+        steps are about to install, so its elevation answer must be *that*
+        manager's, and the manager does not exist yet to ask. The report that
+        made this matter: a pipx forced on a locked all-users environment had
+        its installation elevated (correct - that writes the environment)
+        and its upgrade elevated with it (wrong - pipx writes its own home),
+        which threw away the streamed output exactly when the user needed to
+        see why the command failed.
+        """
+        return self._backend_for_assumption(name).needs_elevation(action, self._prefix)
+
+    def _backend_for_assumption(self, name: str) -> Backend:
+        """The not-yet-installed manager, bound to the path pip is about to fill."""
         executable = self.facts.executable
         if executable is None:
             # Nothing runs a package manager without an interpreter, and a
@@ -938,14 +1159,14 @@ class InventoryService:
                 "this environment has no interpreter to run a package manager with"
             )
         if name == "uv":
-            backend: Backend = UvBackend(
-                executable=uv_path_in_prefix(self._prefix), python=executable
-            )
-        else:
-            backend = PipBackend(prefix=self._prefix, python=executable)
-        if not backend.capability.supports(action.kind):
-            raise UnsupportedBackendError(f"{name} cannot perform {action.kind.value}")
-        return self._with_index_args(backend.plan(action))
+            return UvBackend(executable=uv_path_in_prefix(self._prefix), python=executable)
+        if name in _PIP_INSTALLABLE_TOOLS:
+            # The bootstrap installs these with pip, which puts their command
+            # scripts in the environment's own script directory - the same
+            # place uv's lands - so the plan's first word is where the queued
+            # install is about to put it.
+            return _TOOL_BACKENDS[name](executable=script_path_in_prefix(self._prefix, name))
+        return PipBackend(prefix=self._prefix, python=executable)
 
     def execute(
         self,
@@ -960,30 +1181,30 @@ class InventoryService:
         With ``elevated=True`` the same plan runs through the OS's standard
         elevation mechanism instead: the command is identical, only the
         privileges it is granted differ, and the request covers this one
-        action only (SPEC section 11.5). Elevated runs cannot stream output
-        on every platform, so ``on_line`` is ignored for them and the caller
-        tells the user the log will carry the result rather than the run.
+        action only (SPEC section 11.5). An elevated run streams its real
+        output too - on Windows through the log file the elevated helper
+        writes and the unprivileged process follows - so ``on_line`` is
+        passed on for it like any other run, and the log, the progress
+        bar and the failure line all see what actually happened.
         """
         if elevated:
-            return self.backend.execute_elevated(plan, cancel=cancel)
+            return self.backend.execute_elevated(plan, cancel=cancel, on_line=on_line)
         return self.backend.execute(plan, cancel=cancel, on_line=on_line)
 
     def backend_needs_elevation(self, action: PackageAction) -> bool:
         """Whether running *action* through this backend needs administrator rights.
 
-        The answer is about the *backend*, not the package: a backend with no
-        user-site path of its own - uv has none - can only write the
-        environment's own site-packages, and on an all-users install that is
-        exactly the directory a normal user may not change. It is the one case
-        where pip silently falls back to the user site and uv fails with a
-        permission error instead, and it is why ``can_install_user`` is the
-        capability this check keys on: a backend that has a user-site path
-        always has somewhere writable to go as a normal user, so it never
-        needs the OS's help.
+        The backend answers, because *it* knows what its commands write: a
+        backend with a user-site path of its own (pip) always has somewhere
+        writable to go as a normal user; one whose commands never touch the
+        selected environment (pipx) is judged by its own scope - elevating
+        its commands would lose their output to grant privileges they do not
+        need; a project tool writes the project folder, not the prefix's
+        site-packages; and uv, with no user-site path, can only write the
+        environment's own site-packages - on an all-users install exactly
+        the directory a normal user may not change.
         """
-        if self.backend.capability.can_install_user:
-            return False
-        return not site_packages_writable(self._prefix)
+        return self.backend.needs_elevation(action, self._prefix)
 
     def backend_can_reach_targets(self, action: PackageAction, *, backend_name: str = "") -> bool:
         """Whether this backend can change what the interpreter imports for *action*.
@@ -1017,7 +1238,29 @@ class InventoryService:
             capability = self.backend.capability
         if capability.can_install_user:
             return True
+        if not capability.targets_selected_environment:
+            # A backend whose commands never write the selected environment -
+            # pipx, whose applications live in its own home - can neither be
+            # blocked by a shadowing copy nor fix one: the question is about
+            # what the selected interpreter imports, and its rows answer to
+            # its own scope. Sending such an upgrade to the pip fallback
+            # would replace the manager the user chose for a reason that does
+            # not apply to it.
+            return True
 
+        return not self.action_targets_user_site(action)
+
+    def action_targets_user_site(self, action: PackageAction) -> bool:
+        """Whether the copy Python imports of any target lives outside the prefix.
+
+        The test ``backend_can_reach_targets`` exists for is stated once
+        here: a package whose imported copy lives in the user site (or
+        anywhere outside the environment's own directories) can only be
+        changed by a backend that writes there. The pip fallback asks the
+        same question directly, to decide whether its plan needs
+        ``--user`` - the flag that guarantees the upgrade lands on the
+        copy the interpreter actually imports.
+        """
         index = self.metadata_index()
         own = own_site_packages_directories(self._prefix)
 
@@ -1026,9 +1269,26 @@ class InventoryService:
             if metadata is None or metadata.location is None:
                 continue
             if not any(metadata.location.is_relative_to(directory) for directory in own):
-                return False
+                return True
+        return False
 
-        return True
+    def manager_applies_to_environment(self, name: str) -> bool:
+        """Whether *name* is the right kind of manager for this environment.
+
+        Installed or not is not the question: ``supports_environment`` is
+        answered from the environment's own kind, so a forced choice that
+        could never manage this environment is known before anything is
+        planned. A manager that does not apply here must not be offered as
+        "install it first" - the bootstrap would promise an upgrade through
+        it that cannot happen, which is exactly the report of a forced
+        poetry that only ever said "run with pip". Unknown names answer
+        True: the missing-manager path is the one that explains them.
+        """
+        try:
+            backend = _make_backend(name, self._prefix, None)
+        except (UnsupportedBackendError, ValueError, OSError):
+            return True
+        return backend.supports_environment(self._prefix)
 
     def outdated_names(self, inventory: Inventory) -> tuple[str, ...]:
         """The names of the outdated packages, in table order."""
@@ -1042,6 +1302,55 @@ class InventoryService:
             environment=self._prefix,
             specs=(spec,),
             user=user,
+        )
+
+    def action_for_manager_install(self, name: str) -> PackageAction:
+        """The request context an install-only batch is recorded under.
+
+        The plans that install a missing manager are pip commands, but the
+        history and the snapshot record what the *decision* was about, and
+        that is the manager's name: the row reads "install: pipx", which is
+        exactly what the user approved from the settings page.
+        """
+        return PackageAction(
+            kind=ActionKind.INSTALL,
+            environment=self._prefix,
+            specs=(name,),
+        )
+
+    def action_for_manager_removal(self, name: str) -> PackageAction:
+        """The request context a manager removal is recorded under.
+
+        The history row reads "uninstall: pipx" - the manager's own kind of
+        change, recorded like every other uninstall.
+        """
+        return PackageAction(
+            kind=ActionKind.UNINSTALL,
+            environment=self._prefix,
+            names=(name,),
+        )
+
+    def manager_removal_plan(self, name: str, action: PackageAction) -> CommandPlan:
+        """The pip command that removes a manager from this environment.
+
+        Only the managers pip can install are removable, because pip is the
+        tool that put them there: conda and mamba are refused with the same
+        shape of sentence their install is, and pip itself is not offered at
+        all - the baseline manager is what every bootstrap path starts from.
+        """
+        if not manager_removable(name):
+            raise UnsupportedBackendError(
+                f"{name} is not a manager this application removes; "
+                "only the tools pip installs are removable here"
+            )
+        executable = self.facts.executable
+        if executable is None:
+            raise UnsupportedBackendError("this environment has no interpreter to run pip with")
+        return CommandPlan(
+            argv=(str(executable), "-m", "pip", "uninstall", "--yes", "--", name),
+            action=action,
+            label=f"uninstall {name}",
+            backend="pip",
         )
 
     def action_for_restore(self, specs: Sequence[str]) -> PackageAction:

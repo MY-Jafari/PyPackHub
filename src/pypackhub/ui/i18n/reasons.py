@@ -93,6 +93,14 @@ _POLICY_EN: Final[dict[str, str]] = {
         "This environment lives inside pyenv's versions directory. It is isolated, but pyenv "
         "also owns the folder name."
     ),
+    "target.project": (
+        "This is a project folder. Its own tool (poetry, pipenv or pdm) records every change "
+        "in the project's files, so the whole team sees what was added, not just this machine."
+    ),
+    "target.pipx_home": (
+        "pipx installs applications into your user directory; the selected environment is "
+        "not touched."
+    ),
     "target.isolated_environment": (
         "This environment is isolated; installing here cannot affect other projects."
     ),
@@ -112,6 +120,13 @@ _POLICY_FA: Final[dict[str, str]] = {
     ),
     "target.pyenv": (
         "این محیط در پوشهٔ نسخه‌های pyenv قرار دارد. جدا است، اما نام پوشه هم در اختیار pyenv است."
+    ),
+    "target.project": (
+        "این یک پوشهٔ پروژه است. ابزار خود پروژه (poetry، pipenv یا pdm) هر تغییر را در "
+        "پرونده‌های پروژه ثبت می‌کند، پس همهٔ اعضای تیم آن را می‌بینند، نه فقط این رایانه."
+    ),
+    "target.pipx_home": (
+        "pipx برنامه‌ها را در پوشهٔ کاربر نصب می‌کند؛ به محیط انتخاب‌شده دست نمی‌زند."
     ),
     "target.isolated_environment": ("این محیط جدا است؛ نصب در آن به پروژه‌های دیگر آسیبی نمی‌زند."),
 }

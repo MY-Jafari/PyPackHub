@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -29,6 +29,7 @@ from pypackhub.core.platform_guard import (
     inspect,
 )
 from pypackhub.core.runner import CommandResult, run
+from pypackhub.core.validation import is_verified_environment
 
 __all__ = [
     "CreateEnvironmentError",
@@ -289,12 +290,18 @@ def detected_environments(
     roots: tuple[Path, ...] | None = None,
     *,
     include_running: bool = True,
+    registered: Sequence[Path] = (),
 ) -> EnvironmentListing:
     """Discover Python environments under the given roots.
 
     The running interpreter is included separately so it is always present even
     when it does not live under a scanned root. Environments are returned in a
     stable order so the UI does not reshuffle them between refreshes.
+
+    ``registered`` are the folders the user pointed the application at:
+    they are offered when they are still on disk and look like an
+    environment or a project, and a folder that is gone is skipped rather
+    than forgotten, so it comes back if its drive does.
     """
     scanned = _candidate_roots(roots)
 
@@ -336,6 +343,47 @@ def detected_environments(
                     source=EnvironmentSource.SCAN,
                 )
             )
+
+    for candidate in registered:
+        resolved = Path(candidate).expanduser()
+        try:
+            resolved = resolved.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        try:
+            if not is_verified_environment(resolved):
+                continue
+            facts = inspect(resolved)
+        except OSError:
+            continue
+        if facts.kind is EnvironmentKind.PROJECT and facts.executable is None:
+            # A project folder is exactly the registered case with no
+            # interpreter at its root - that is what makes it a project and
+            # not an environment, so the "interpreter is gone" refusal for
+            # environments does not apply.
+            seen.add(resolved)
+            found.append(
+                ListedEnvironment(
+                    prefix=resolved,
+                    facts=facts,
+                    source=EnvironmentSource.EXPLICIT,
+                )
+            )
+            continue
+        if not _is_interesting_environment(facts):
+            continue
+        if facts.executable is None and facts.kind is not EnvironmentKind.SYSTEM:
+            continue
+        seen.add(resolved)
+        found.append(
+            ListedEnvironment(
+                prefix=resolved,
+                facts=facts,
+                source=EnvironmentSource.EXPLICIT,
+            )
+        )
 
     if include_running:
         running = Path(sys.prefix).resolve()

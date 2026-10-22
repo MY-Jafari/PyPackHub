@@ -12,6 +12,7 @@ combo all at once.
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from pypackhub.core.environments import (
     detected_environments,
 )
 from pypackhub.core.platform_guard import EnvironmentKind, InterpreterFacts
+from pypackhub.core.validation import is_verified_environment
 from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
@@ -44,10 +46,15 @@ __all__ = ["EnvironmentsView"]
 
 
 def _kind_label(kind: EnvironmentKind, translator) -> str:
+    # The names are the tools' own words, shown untranslated: they are what
+    # the folder on disk is called by the thing that made it, and a "poetry
+    # project" badge with a translated "poetry" would be harder to match to
+    # the poetry on the user's machine, not easier.
     labels = {
         EnvironmentKind.VENV: "venv",
         EnvironmentKind.CONDA: "conda",
         EnvironmentKind.PYBENV: "pyenv",
+        EnvironmentKind.PROJECT: "project",
         EnvironmentKind.SYSTEM: "system",
     }
     return labels.get(kind, kind.value)
@@ -115,6 +122,10 @@ class EnvironmentsView(QWidget):
         self.refresh_button.clicked.connect(self._refresh)
         header.addWidget(self.refresh_button)
 
+        self.add_folder_button = QPushButton(self)
+        self.add_folder_button.clicked.connect(self._add_folder)
+        header.addWidget(self.add_folder_button)
+
         layout.addLayout(header)
 
         self._scroll = QScrollArea(self)
@@ -161,15 +172,89 @@ class EnvironmentsView(QWidget):
 
         roots: list[Path] = list(DEFAULT_SEARCH_ROOTS)
         roots.append(Path.cwd())
+        registered = tuple(
+            Path(path) for path in self._shell.settings.registered_environments if path.strip()
+        )
 
         def work(_task_id: str, _progress: object, _cancel: threading.Event) -> object:
-            return detected_environments(tuple(roots))
+            return detected_environments(tuple(roots), registered=registered)
 
         self._load_task = self._context.tasks.schedule(
             self._shell.text(TranslationKey.NAV_ENVIRONMENTS),
             work,
             on_finish=lambda _task_id, result: emit_if_alive(self.environments_ready, result),
         )
+
+    def _add_folder(self) -> None:
+        """Point the application at an environment or project folder.
+
+        The folder is *registered*, never copied or moved, and never deleted:
+        the card it gets offers "Forget", which only edits this list. That is
+        the whole difference from the environments discovery finds on its
+        own - a registered folder is remembered across launches wherever it
+        lives, because discovery only looks inside a few well-known roots.
+        """
+        from PySide6.QtWidgets import QFileDialog
+
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            self._shell.text(TranslationKey.ENV_ADD_FOLDER_TITLE),
+            str(Path.home()),
+        )
+        if not chosen:
+            return
+
+        folder = Path(chosen)
+        if not is_verified_environment(folder):
+            self.toast.emit(
+                self._shell.text(TranslationKey.ENV_NOT_ENVIRONMENT),
+                ToastKind.ERROR,
+            )
+            return
+
+        as_text = str(folder)
+        current = tuple(self._shell.settings.registered_environments)
+        if as_text in current:
+            self.toast.emit(
+                self._shell.text(TranslationKey.ENV_REGISTERED_ALREADY, path=as_text),
+                ToastKind.INFO,
+            )
+            return
+
+        updated = replace(
+            self._shell.settings,
+            registered_environments=(*current, as_text),
+        )
+        self._shell.apply_settings(updated)
+        self._shell.save()
+        self._context.set_registered_environments(
+            tuple(Path(path) for path in updated.registered_environments)
+        )
+        self.toast.emit(
+            self._shell.text(TranslationKey.ENV_REGISTERED_ADDED, path=as_text),
+            ToastKind.SUCCESS,
+        )
+        # The registered folder appears in the next listing, not this one;
+        # refreshing now (instead of on the next visit) makes the cause
+        # visible where the effect is.
+        self._refresh()
+
+    def _forget(self, prefix: str) -> None:
+        """Remove one registered folder from the list; nothing on disk changes."""
+        remaining = tuple(
+            path for path in self._shell.settings.registered_environments if path != prefix
+        )
+        updated = replace(self._shell.settings, registered_environments=remaining)
+        self._shell.apply_settings(updated)
+        self._shell.save()
+        self._context.set_registered_environments(
+            tuple(Path(path) for path in updated.registered_environments)
+        )
+        self.toast.emit(
+            self._shell.text(TranslationKey.ENV_REGISTERED_REMOVED, path=prefix),
+            ToastKind.INFO,
+        )
+        self._refresh()
 
     def _on_environments_ready(self, result: Any) -> None:
         """Render the listing the worker found; a refresh reports its outcome."""
@@ -268,6 +353,18 @@ class EnvironmentsView(QWidget):
 
         self._attach_metadata(top, facts, env.source)
 
+        # Only a folder the user registered offers "Forget": discovery's own
+        # findings have no list entry to remove, and the button's whole
+        # promise is that the folder on disk is not touched.
+        if env.source is EnvironmentSource.EXPLICIT:
+            forget_button = QPushButton(self)
+            forget_button.setObjectName("secondaryText")
+            forget_button.setText(self._shell.text(TranslationKey.ENV_FORGET))
+            forget_button.setAutoDefault(False)
+            forget_button.setToolTip(self._shell.text(TranslationKey.ENV_REGISTERED_HINT))
+            top.addWidget(forget_button)
+            forget_button.clicked.connect(lambda checked=False, p=prefix: self._forget(p))
+
         layout.addLayout(top)
 
         path_label = QLabel(prefix, card)
@@ -330,4 +427,6 @@ class EnvironmentsView(QWidget):
     def retranslate(self) -> None:
         self.title_label.setText(self._shell.text(TranslationKey.NAV_ENVIRONMENTS))
         self.refresh_button.setText(self._shell.text(TranslationKey.DEPS_REFRESH))
+        self.add_folder_button.setText(self._shell.text(TranslationKey.ENV_ADD_FOLDER))
+        self.add_folder_button.setToolTip(self._shell.text(TranslationKey.ENV_ADD_FOLDER_TITLE))
         self._render()

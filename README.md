@@ -14,9 +14,9 @@
 **One visual interface for every Python environment on your machine.**
 
 PyPackHub is a cross-platform desktop application (Windows, Linux, macOS) for
-looking at and managing Python packages and environments. It speaks pip and uv
-today, and is built to grow to conda/mamba, poetry, pipx, pipenv and pdm — so you
-do not have to remember the exact command line of each one.
+looking at and managing Python packages and environments. It speaks pip, uv,
+conda, mamba, poetry, pipx, pipenv and pdm — so you do not have to remember
+the exact command line of each one.
 
 It is built for people who want to *see* what is installed, what is out of date,
 what depends on what, and what is safe to remove — before anything is changed,
@@ -55,7 +55,7 @@ nothing here is available as a release yet. This table is kept honest on purpose
 | uv on all-users Pythons: per-action administrator prompts, pip offered when the user site shadows the target | ✅ done |
 | Stand-alone installers for Windows, Linux and macOS, plus automatic releases | ✅ done (publishes when a `v*` tag is pushed) |
 | Trust panel and typosquatting warnings, import/export, conflict checks, disk-usage analysis | ✅ done (phase 2) |
-| conda/mamba, poetry, pipx, pipenv and pdm backends | 📋 later phases |
+| conda/mamba, poetry, pipx, pipenv and pdm backends; project folders as registrable locations | ✅ done (phase 3) |
 
 The full plan, the phase breakdown and every decision taken so far live in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
@@ -165,7 +165,8 @@ their answers on screen rather than re-fetching them behind your back.
   carries, shown with the last scan's time so a stale number can be recognised
   as one. Its **Analyse disk usage** button opens a measured breakdown: the
   whole environment, the largest packages drawn as bars against each other,
-  and what pip's and uv's download caches hold — inspection only, because
+  and what the package-manager caches hold — pip's, uv's, poetry's, and conda's
+  when its own variables say where it is — inspection only, because
   deleting is a change and goes through a confirmation like every other.
 * **Packages** lists what is installed, with the status, the version and (once
   measured) the size of each package. Search filters the table, the *outdated*
@@ -180,7 +181,40 @@ their answers on screen rather than re-fetching them behind your back.
 * **Environments** lists every Python environment PyPackHub found, what kind each
   one is, and lets you switch to it with one click. Switching also moves the
   package table and the top-bar selector, so the whole window agrees on one
-  "current" environment.
+  "current" environment. **Add a folder…** reaches the places discovery does
+  not walk: a conda environment you keep somewhere custom, or a poetry /
+  pipenv / pdm project folder — the tool that owns its files is picked up
+  automatically. A registered folder is remembered and never deleted;
+  **Forget** removes it from the list and touches nothing on disk.
+* **Which package manager** a change runs through follows the environment:
+  the *automatic* choice picks uv or pip for a virtual environment, mamba or
+  conda for a conda environment (conda's own listing is the only complete
+  one there), and the owning tool for a project folder. The settings page
+  can also force a name — poetry, pipx, pipenv, pdm included — and the
+  forced manager is used wherever it can manage the environment. A forced
+  manager that is missing *and applies here* is offered to be installed
+  first (conda and mamba say where they come from instead: they are not pip
+  packages). One that cannot manage this environment at all — poetry
+  outside a project folder, conda outside a conda environment — is never
+  sold as "install it first": the action says why it cannot run here and
+  offers the same change through pip, with the exact command shown. A
+  manager never runs against a location it cannot manage:
+  conda stays away from venvs, poetry stays away from environment prefixes,
+  and pipx — whose applications live in its own home, not in the selected
+  environment — hides the size column rather than showing numbers that might
+  belong to some other environment. Choosing a manager checks it on the
+  spot: an installed one says so under the combo, a missing one PyPackHub
+  can install offers to install itself right there — the same confirmed,
+  logged and recorded install the next action would have offered — and
+  one it cannot install (conda, mamba: they are not pip packages) says
+  where it comes from instead, so no "install now?" ever ends in a
+  refusal. The manager is ready before you ever click Upgrade. An installed manager that pip put there
+  can be removed the same way — one confirmed command, recorded like every
+  other uninstall. Both actions run right where you asked for them, on the
+  settings page: a small progress bar under the combo fills with the
+  install's real download and install percentage, turns fully red if the
+  run fails, and the live log opens below the page — the same log,
+  history row and failure line as every other change.
 * **Search** finds packages on PyPI: the query is ranked against a bundled
   popular-package catalogue and resolved against the live index, several
   lookups at a time, with results filling in as they arrive. Selecting a result
@@ -338,8 +372,10 @@ than by discipline:
 2. **Every subprocess goes through `core/runner.py`**, with an argument list,
    a sanitized environment and a killable process tree. `shell=True`,
    `os.system` and string-concatenated commands are banned and scanned for.
-3. **The UI never calls pip or uv.** It asks a backend; the backend asks
-   the runner.
+3. **The UI never calls a package manager.** It asks a backend; the backend asks
+   the runner. pip, uv, conda, mamba, poetry, pipx, pipenv and pdm all go
+   through that one path, so the command a confirmation shows is always the
+   command that runs.
 
 ## Security
 
@@ -364,7 +400,7 @@ implemented today and how to report a vulnerability privately.
 | --- | --- | --- |
 | 1 | Foundation + security core | Environment detection, package table with status and sizes, install/uninstall/upgrade/downgrade, detail panel, confirmation dialogs showing the exact command, live cancellable log, dark/light themes, English + Persian RTL |
 | 2 | Smart management + supply chain | Dependency tree and reverse dependencies, orphan clean-up, dry-run previews, conflict checks, PyPI browsing, trust panel and typosquatting warnings, import/export, disk-usage analysis, dashboard |
-| 3 | Multi-environment, multi-manager | Discover and switch between every environment on the machine, create/clone/back up/delete, compare two environments, move packages between them, interpreter manager |
+| 3 | Multi-environment, multi-manager | Discover and switch between every environment on the machine, conda/mamba, poetry, pipx, pipenv and pdm backends, project folders as registrable locations, create/clone/back up/delete, compare two environments, move packages between them, interpreter manager |
 | 4 | Security scanning and power tools | Vulnerability scan with one-click fixes, snapshots and rollback, undo history, tags and pins, hash-pinned installs, command palette, app updates, CLI companion |
 
 ## Comparison with similar tools
@@ -392,9 +428,9 @@ License — see `src/pypackhub/assets/fonts/`.
 **یک رابط بصری برای همهٔ محیط‌های پایتون روی رایانهٔ شما.**
 
 پای‌پک‌هاب یک برنامهٔ رومیزی چندسکویی (ویندوز، لینوکس، مک) برای دیدن و مدیریت
-بسته‌ها و محیط‌های پایتون است. امروز با pip و uv کار می‌کند و برای افزودن
-conda/mamba، poetry، pipx، pipenv و pdm ساخته شده است، تا دیگر لازم نباشد
-دستور دقیق خط فرمان هرکدام را به خاطر بسپارید.
+بسته‌ها و محیط‌های پایتون است. با pip، uv، conda، mamba، poetry، pipx، pipenv
+و pdm کار می‌کند، تا دیگر لازم نباشد دستور دقیق خط فرمان هرکدام را به خاطر
+بسپارید.
 
 این برنامه برای کسانی ساخته شده که می‌خواهند *ببینند* چه چیزی نصب است، چه چیزی
 به‌روز نیست، چه چیزی به چه چیزی وابسته است و حذف چه چیزی ایمن است — پیش از آنکه
@@ -434,7 +470,7 @@ conda/mamba، poetry، pipx، pipenv و pdm ساخته شده است، تا دی
 | uv روی پایتون‌های همه‌کاربر: درخواست دسترسی مدیریتی برای هر کار، و پیشنهاد pip وقتی site کاربر هدف را سایه می‌اندازد | ✅ انجام شده |
 | برنامه‌های نصبی ویندوز، لینوکس و مک به‌همراه انتشار خودکار | ✅ انجام شده (با زدن برچسب `v*` منتشر می‌شود) |
 | پنل اعتماد و هشدارهای شبیه‌سازی نام، درون‌ریزی/برون‌ریزی، بررسی تعارض، تحلیل مصرف دیسک | ✅ انجام شده (فاز ۲) |
-| پشتیبان‌های conda/mamba، poetry، pipx، pipenv و pdm | 📋 فازهای بعدی |
+| پشتیبان‌های conda/mamba، poetry، pipx، pipenv و pdm؛ پوشه‌های پروژه به‌عنوان مکان‌های قابل ثبت | ✅ انجام شده (فاز ۳) |
 
 برنامهٔ کامل، تقسیم‌بندی فازها و همهٔ تصمیم‌های گرفته‌شده در
 [`docs/DECISIONS.md`](docs/DECISIONS.md) آمده است.
@@ -543,7 +579,8 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
   روی بسته‌هایش، همراه با زمان آخرین بررسی تا پاسخ کهنه به‌عنوان کهنه شناخته
   شود. دکمهٔ **تحلیل مصرف دیسک** آن، تصویر اندازه‌گیری‌شده را باز می‌کند: کل
   محیط، بزرگ‌ترین بسته‌ها به‌صورت میله‌های متناسب، و آنچه حافظه‌های پنهانیِ
-  دانلودِ pip و uv در خود دارند — فقط نگاه‌کردن، چون حذف‌کردن تغییر است و
+  مدیران بسته در خود دارند — pip، uv، poetry، و conda وقتی متغیرهای خودش
+  جای آن را بگویند — فقط نگاه‌کردن، چون حذف‌کردن تغییر است و
   مثل هر تغییر دیگری از تأیید می‌گذرد.
 * **بسته‌ها** آنچه نصب است را همراه با وضعیت، نسخه و (پس از اندازه‌گیری) اندازهٔ
   هر بسته نشان می‌دهد. جست‌وجو جدول را فیلتر می‌کند، گزینهٔ *فقط به‌روزنشده‌ها*
@@ -559,7 +596,37 @@ python -m pypackhub # همان نقطهٔ ورود، بدون وابستگی ب�
 * **محیط‌ها** هر محیط پایتونی که پای‌پک‌هاب یافته را همراه با نوع آن فهرست
   می‌کند و با یک کلیک به آن سوییچ می‌شوید. سوییچ، جدول بسته‌ها و انتخاب‌گر نوار
   بالا را هم همراه خود می‌برد، تا تمام پنجره بر یک محیط «فعلی» توافق داشته
-  باشد.
+  باشد. **افزودن پوشه…** به جاهایی می‌رسد که شناسایی در آن‌ها گردش نمی‌کند:
+  محیط کوندایی که جای دیگری نگه می‌دارید، یا پوشهٔ پروژهٔ poetry / pipenv /
+  pdm — ابزارِ مالک پرونده‌هایش خودبه‌خود شناخته می‌شود. پوشهٔ ثبت‌شده به خاطر
+  سپرده می‌شود و هرگز حذف نمی‌شود؛ **فراموش کردن** فقط آن را از فهرست برمی‌دارد و
+  به چیزی روی دیسک دست نمی‌زند.
+* **اینکه کدام مدیر بسته** کار را انجام دهد از محیط پیروی می‌کند: انتخاب
+  *خودکار* برای محیط مجازی uv یا pip را برمی‌گزیند، برای محیط کوندا mamba یا
+  conda را (گزارش خودِ کوندا تنها گزارش کامل آنجاست)، و برای پوشهٔ پروژه
+  ابزارِ مالک را. صفحهٔ تنظیمات می‌تواند یک نام را تحمیل کند — poetry،
+  pipx، pipenv و pdm هم — و مدیرِ تحمیل‌شده هرجا بتواند محیط را مدیریت
+  کند به کار می‌رود. مدیرِ تحمیل‌شده‌ای که نصب نیست و اینجا به کار می‌آید،
+  ابتدا پیشنهاد نصب داده می‌شود (conda و mamba به‌جای آن می‌گویند از کجا
+  می‌آیند: آن‌ها بستهٔ pip نیستند)؛ و مدیری که اصلاً نمی‌تواند این محیط را
+  مدیریت کند — poetry بیرون پوشهٔ پروژه، conda بیرون محیط کوندا — هرگز
+  به‌عنوان «اول نصبش کن» فروخته نمی‌شود: خودِ کار می‌گوید چرا اینجا نمی‌تواند
+  اجرا شود و همین تغییر را با pip پیشنهاد می‌دهد، با دستور دقیقِ نشان‌داده‌شده.
+  هیچ مدیری روی مکانی که نمی‌تواند
+  مدیریتش کند اجرا نمی‌شود: conda از محیط‌های مجازی دور می‌ماند، poetry از
+  پیشوندهای محیط، و pipx — که برنامه‌هایش در خانهٔ خودش زندگی می‌کنند، نه در
+  محیط انتخابی — ستون اندازه را پنهان می‌کند تا عددی که شاید به محیط دیگری
+  تعلق دارد نشان ندهد. انتخاب یک مدیر، همان‌جا بررسی‌اش می‌کند: نصب‌بودنش
+  زیر فهرست گفته می‌شود، نبودنش — اگر خودِ برنامه بتواند نصبش کند —
+  پیشنهاد نصبِ همان‌جا می‌دهد (همان نصبِ تأییدشده، ثبت‌شده و گزارش‌شده‌ای
+  که کارِ بعدی می‌داد)، و مدیری که برنامه نمی‌تواند نصبش کند (conda و
+  mamba: بستهٔ pip نیستند) به‌جای پرسش، می‌گوید از کجا می‌آید — تا هیچ
+  «نصب شود؟»ای به ردّی تمام نشود. مدیری که pip آن را نصب کرده باشد، همان‌را می‌توان حذف
+  کرد — یک فرمان تأییدشده، ثبت‌شده مثل هر حذف دیگری. هر دو کار همان‌جا
+  اجرا می‌شوند که خواسته‌اید، در صفحهٔ تنظیمات: نوار پیشرفت کوچکی زیر
+  فهرست، با درصدِ واقعیِ دانلود و نصبِ خودِ فرمان پُر می‌شود و اگر کار
+  شکست بخورد تمامش سرخ می‌شود، و گزارش زنده زیر صفحه باز می‌شود — همان
+  گزارش، سطر تاریخچه و خط شکستِ هر تغییر دیگر.
 * **جست‌وجو** بسته‌ها را در PyPI پیدا می‌کند: پرس‌وجو بر پایهٔ یک فهرست همراه
   از بسته‌های محبوب رتبه‌بندی و با نمایهٔ زنده حل می‌شود، چند نگاه هم‌زمان، و
   نتایج همان‌طور که می‌رسند پر می‌شوند. انتخاب یک نتیجه، تاریخچهٔ انتشارش را
@@ -714,8 +781,8 @@ tests/           # تست‌های واحد، به‌علاوهٔ tests/security
 ۲. **هر فرایند از `core/runner.py` می‌گذرد**، با فهرست آرگومان، محیط پاک‌سازی‌شده
    و درخت فرایندی که می‌توان کشت. `shell=True`، `os.system` و دستورهای
    رشته‌به‌هم‌چسبیده ممنوع و پویش می‌شوند.
-۳. **رابط کاربری هرگز pip یا uv را صدا نمی‌زند.** از یک پشتیبان می‌پرسد؛ پشتیبان
-   از اجراکننده می‌پرسد.
+۳. **رابط کاربری هرگز مدیر بسته را صدا نمی‌زند.** از یک پشتیبان می‌پرسد؛ پشتیبان
+    از اجراکننده می‌پرسد. pip، uv، conda، mamba، poetry، pipx، pipenv و pdm همگی از همان یک مسیر می‌گذرند، پس فرمانی که تأییدیه نشان می‌دهد همیشه همان فرمانی است که اجرا می‌شود.
 
 ## امنیت
 
@@ -739,7 +806,7 @@ tests/           # تست‌های واحد، به‌علاوهٔ tests/security
 | --- | --- | --- |
 | ۱ | پایه + هستهٔ امنیت | شناسایی محیط، جدول بسته‌ها با وضعیت و اندازه، نصب/حذف/ارتقا/نصب نسخهٔ قدیمی‌تر، پنل جزئیات، پنجره‌های تأیید با نمایش دستور دقیق، گزارش زندهٔ قابل‌لغو، تم روشن/تیره، انگلیسی + فارسی راست‌به‌چپ |
 | ۲ | مدیریت هوشمند + زنجیرهٔ تأمین | درخت وابستگی و وابستگی‌های معکوس، پاک‌سازی بسته‌های بی‌نیاز، پیش‌نمایش‌های آزمایشی، بررسی تعارض، مرور PyPI، پنل اعتماد و هشدارهای شبیه‌سازی نام، درون‌ریزی/برون‌ریزی، تحلیل مصرف دیسک، داشبورد |
-| ۳ | چندمحیطی، چندمدیره | شناسایی و سوییچ میان همهٔ محیط‌های ماشین، ساخت/همسان‌سازی/پشتیبان‌گیری/حذف، مقایسهٔ دو محیط، جابه‌جایی بسته‌ها میان‌شان، مدیر مفسر |
+| ۳ | چندمحیطی، چندمدیره | شناسایی و سوییچ میان همهٔ محیط‌های ماشین، پشتیبان‌های conda/mamba، poetry، pipx، pipenv و pdm، پوشه‌های پروژه به‌عنوان مکان‌های قابل ثبت، ساخت/همسان‌سازی/پشتیبان‌گیری/حذف، مقایسهٔ دو محیط، جابه‌جایی بسته‌ها میان‌شان، مدیر مفسر |
 | ۴ | بررسی امنیتی و ابزارهای قدرتمند | بررسی آسیب‌پذیری با اصلاح یک‌کلیکی، نقاط بازیابی و بازگشت، تاریخچهٔ بازگشت، برچسب‌ها و سنجاق‌ها، نصب با هش، پالت دستور، به‌روزرسانی برنامه، همراه CLI |
 
 ## مقایسه با ابزارهای مشابه

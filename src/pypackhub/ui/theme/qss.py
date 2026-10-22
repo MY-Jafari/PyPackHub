@@ -544,6 +544,12 @@ QProgressBar::chunk {{
     border-radius: {tokens.radius_sm};
 }}
 
+# A failed run's bar: the whole fill turns the danger colour, so a
+# progress bar that stopped is not mistaken for one that is merely slow.
+QProgressBar[error="true"]::chunk {{
+    background-color: {tokens.danger};
+}}
+
 QStatusBar {{
     background-color: {tokens.background_secondary};
     border-top: 1px solid {tokens.border_subtle};
@@ -554,7 +560,6 @@ QGroupBox {{
     border: 1px solid {tokens.border_subtle};
     border-radius: {tokens.radius_m};
     margin-top: 12px;
-    padding: 12px;
 }}
 
 QGroupBox::title {{

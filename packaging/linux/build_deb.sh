@@ -2,7 +2,7 @@
 # Build a Debian package (.deb) from a built PyInstaller bundle.
 #
 # Usage:
-#   packaging/linux/build_deb.sh --bundle dist/PyPackHub --version 0.1.0 \
+#   packaging/linux/build_deb.sh --bundle dist/PyPackHub --version 0.1.1 \
 #       --output release [--icon packaging/icon.png]
 #
 # The package installs the bundle under /opt/pypackhub - the conventional home

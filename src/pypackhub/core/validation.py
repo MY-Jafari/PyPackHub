@@ -682,8 +682,9 @@ def is_verified_environment(path: Path) -> bool:
 
     The spec is explicit that an unrelated folder must never be mistaken for
     one, so this requires the markers the tool that created it leaves behind:
-    ``pyvenv.cfg`` for virtual environments (including pyenv's) and ``conda-meta``
-    for conda environments.
+    ``pyvenv.cfg`` for virtual environments (including pyenv's), ``conda-meta``
+    for conda environments, and a poetry/pipenv/pdm project file for a project
+    folder - the locations the project tools manage.
     """
 
     resolved = Path(path).expanduser()
@@ -701,7 +702,12 @@ def is_verified_environment(path: Path) -> bool:
 
     kind = detect_kind(resolved)
 
-    return kind in {EnvironmentKind.VENV, EnvironmentKind.CONDA, EnvironmentKind.PYBENV}
+    return kind in {
+        EnvironmentKind.VENV,
+        EnvironmentKind.CONDA,
+        EnvironmentKind.PYBENV,
+        EnvironmentKind.PROJECT,
+    }
 
 
 def ensure_inside(path: Path, root: Path) -> Path:
@@ -792,6 +798,18 @@ def ensure_deletable_environment(
             f"{resolved} does not look like a Python environment",
             value=str(path),
             hint="a virtual environment has a pyvenv.cfg; a conda environment has conda-meta",
+        )
+
+    # A project folder is a managed location, but it is the user's source code:
+    # deleting it would destroy work that no environment wizard created. The
+    # registry may list it and the tools may change it; this guard makes sure
+    # the "delete the environment" affordance never applies to it.
+    if detect_kind(resolved) is EnvironmentKind.PROJECT:
+        raise ValidationError(
+            Reason.FORBIDDEN_TARGET,
+            f"{resolved} is a project folder, not a disposable environment",
+            value=str(path),
+            hint="remove it from the list; deleting your project is not offered",
         )
 
     return resolved

@@ -162,6 +162,7 @@ class SettingsPersistence:
             confirm_before_uninstall=_as_bool(values.get("confirm_uninstall"), True),
             confirm_before_upgrade=_as_bool(values.get("confirm_upgrade"), True),
             package_manager=_as_str(values.get("package_manager"), "auto"),
+            registered_environments=_as_str_list(values.get("registered_environments")),
         )
         return validate_settings(settings)
 
@@ -182,6 +183,7 @@ class SettingsPersistence:
             "confirm_uninstall": settings.confirm_before_uninstall,
             "confirm_upgrade": settings.confirm_before_upgrade,
             "package_manager": settings.package_manager,
+            "registered_environments": list(settings.registered_environments),
             "default_environment_index": settings.default_environment_index,
             "default_target_environment": settings.default_target_environment,
             "main_window_geometry": settings.main_window_geometry,

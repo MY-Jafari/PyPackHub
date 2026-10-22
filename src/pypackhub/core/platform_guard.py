@@ -52,6 +52,7 @@ class EnvironmentKind(str, Enum):
     VENV = "venv"
     CONDA = "conda"
     PYBENV = "pyenv"
+    PROJECT = "project"
     SYSTEM = "system"
 
 
@@ -126,6 +127,54 @@ def is_windows_app_alias_stub(path: Path) -> bool:
         return False
 
 
+#: A project whose dependency list a pip-family tool owns. Each entry pairs
+#: the lock file that only that tool writes with the ``[tool.*]`` section its
+#: users put in ``pyproject.toml``; either one alone proves the project, and
+#: the order decides when two tools could both claim the same folder.
+_POETRY_MARKERS: Final = ("poetry.lock", "[tool.poetry]")
+_PDM_MARKERS: Final = ("pdm.lock", "[tool.pdm]")
+
+#: How much of a ``pyproject.toml`` is read while classifying a folder. The
+#: tool sections a project declares live near the top by convention, and a
+#: classifier that reads a whole file on every scan pays for a file that can
+#: be arbitrarily large.
+_PROJECT_MARKER_SCAN_BYTES: Final = 65536
+
+
+def project_tool(path: Path) -> str:
+    """Which project tool owns *path*: ``"poetry"``, ``"pdm"``, ``"pipenv"`` or "".
+
+    A ``Pipfile`` means pipenv. A ``pyproject.toml`` means a managed project
+    only when it carries poetry's or pdm's own markers - a plain ``pyproject.toml``
+    is a library or an app, and neither poetry, pipenv nor pdm would know what
+    to do with it, so it stays unclassified and the folder is not an
+    environment. An environment marker (``pyvenv.cfg``, ``conda-meta``) always
+    wins over a project marker, because the venv inside a project is a
+    different location than the project itself.
+    """
+    resolved = Path(path)
+
+    if (resolved / "Pipfile").is_file():
+        return "pipenv"
+
+    pyproject = resolved / "pyproject.toml"
+    if not pyproject.is_file():
+        return ""
+
+    try:
+        text = pyproject.read_bytes()[:_PROJECT_MARKER_SCAN_BYTES].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    for marker in _POETRY_MARKERS:
+        if marker in text or (resolved / marker).is_file():
+            return "poetry"
+    for marker in _PDM_MARKERS:
+        if marker in text or (resolved / marker).is_file():
+            return "pdm"
+    return ""
+
+
 def detect_kind(prefix: Path) -> EnvironmentKind:
     """Classify a prefix by the markers it carries."""
 
@@ -136,6 +185,9 @@ def detect_kind(prefix: Path) -> EnvironmentKind:
 
     if (prefix / "conda-meta").is_dir():
         return EnvironmentKind.CONDA
+
+    if project_tool(prefix):
+        return EnvironmentKind.PROJECT
 
     return EnvironmentKind.SYSTEM
 
@@ -256,6 +308,20 @@ def modification_policy(facts: InterpreterFacts, *, override: bool = False) -> M
                 "This environment lives inside pyenv's versions directory. It is isolated, "
                 "but pyenv also owns the folder name, so renaming it outside pyenv will "
                 "confuse the tool."
+            ),
+            suggestion=None,
+        )
+
+    if facts.kind is EnvironmentKind.PROJECT:
+        return ModificationPolicy(
+            allowed=True,
+            requires_confirmation=True,
+            severity=Severity.OK,
+            reason_code="target.project",
+            explanation=(
+                "This is a project folder. Its own tool (poetry, pipenv or pdm) "
+                "records every change in the project's files, so the whole team "
+                "sees what was added, not just this machine."
             ),
             suggestion=None,
         )

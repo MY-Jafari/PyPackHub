@@ -45,6 +45,27 @@ _STATE_KEYS = {
 }
 
 
+def _outcome_state(result: TaskResult) -> JobState:
+    """The state a recorded *action* is shown in.
+
+    The task's state says whether the job that wrapped the command ran to
+    completion; the command inside it can still have failed. A non-zero exit
+    is a *finished* job carrying a failed result, and that distinction is
+    the report: an upgrade that failed was recorded as a success, because
+    nothing here looked at the payload. The payload is the truth about the
+    action; the job state only answers for jobs that never produced one.
+    """
+    if result.state is not JobState.FINISHED:
+        return result.state
+    payload = result.payload
+    if isinstance(payload, CommandResult):
+        if payload.cancelled:
+            return JobState.CANCELLED
+        if not payload.ok:
+            return JobState.FAILED
+    return JobState.FINISHED
+
+
 class HistoryEntryItem(QListWidgetItem):
     """One recorded action, carrying its task result and undo context."""
 
@@ -145,7 +166,7 @@ class HistoryView(QWidget):
             if result.timestamp
             else ""
         )
-        state_key = _STATE_KEYS.get(result.state, TranslationKey.HISTORY_STATUS)
+        state_key = _STATE_KEYS.get(_outcome_state(result), TranslationKey.HISTORY_STATUS)
         outcome = self._shell.text(state_key)
         names = result.meta.get("names") or []
         targets = ", ".join(str(name) for name in names)

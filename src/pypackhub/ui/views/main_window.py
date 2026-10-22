@@ -327,6 +327,23 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._settings_view.load_settings(self._shell.settings)
+        # A manager the user chose and then chose to install - or remove -
+        # runs through the packages view's confirm-and-run path, so it lands
+        # in the same log, history and snapshot as every other change (SPEC
+        # section 11.7: the exact command, confirmed). The settings page
+        # keeps the run itself: its manager row owns a small progress bar
+        # that fills with the install's real percentages and turns red on
+        # failure, the window-wide log panel opens below whatever page is
+        # showing, and the Packages page keeps its own bar for its own
+        # actions - the page the install was asked from is the page that
+        # watches it happen.
+        self._settings_view.manager_install_requested.connect(self._install_manager_from_settings)
+        self._settings_view.manager_remove_requested.connect(self._remove_manager_from_settings)
+        # The manager row's run state, forwarded from the one run path to
+        # the row that started it: its bar, its percentage, its outcome.
+        self._packages.manager_run_started.connect(self._settings_view.show_manager_run)
+        self._packages.manager_progress.connect(self._settings_view.set_manager_progress)
+        self._packages.manager_run_finished.connect(self._settings_view.finish_manager_run)
         self.register_view(ViewName.SETTINGS, self._settings_view)
 
         self._dependencies_view = DependenciesView(
@@ -340,6 +357,11 @@ class MainWindow(QMainWindow):
 
         self._packages.status_changed.connect(self._on_status_changed)
         self._packages.toast.connect(self._show_toast)
+        # A run that starts is a run the user should be able to watch: the
+        # log panel is where the live output, the elevated-run note and the
+        # failure line appear, and it starts hidden - a layout choice for
+        # the empty window, not a promise that runs happen in the dark.
+        self._packages.run_started.connect(lambda: self.set_log_panel_visible(True))
         self._log_panel.cancel_requested.connect(self._packages.cancel_running)
         self._log_panel.hide_requested.connect(lambda: self.set_log_panel_visible(False))
         self._search_input.textChanged.connect(self._on_search_changed)
@@ -443,8 +465,36 @@ class MainWindow(QMainWindow):
         if name is ViewName.SNAPSHOTS and hasattr(self, "_snapshots_view"):
             self._snapshots_view.refresh()
 
+        # Exactly one checked page button, and it is the page the user is
+        # on. The buttons are checkable, so a click checks its own; without
+        # this loop every page ever visited stayed checked and the sidebar
+        # read as if several pages were open at once. The log entry is a
+        # toggle for a panel rather than a page, so it reports the panel's
+        # visibility - the one checked state it can be honest about here.
         for view_name, nav_button in self._nav_buttons.items():
-            nav_button.setChecked(view_name is name)
+            if view_name is ViewName.LOGS:
+                nav_button.setChecked(self._log_visible)
+            else:
+                nav_button.setChecked(view_name is name)
+
+    def _install_manager_from_settings(self, name: str) -> None:
+        """Run the install the settings page asked for, on the page it was
+        asked from.
+
+        The user stays where they are: the manager row they just used owns
+        a small progress bar that fills with the install's real
+        percentages and turns red if it fails, and the window-wide log
+        panel opens below the page on its own - so the row that started
+        the install is the row that watches it, and the Packages page is
+        just another watcher with its own bar.
+        """
+        self._packages.install_manager(name)
+
+    def _remove_manager_from_settings(self, name: str) -> None:
+        """Same place, same guarantees: the removal runs where the row that
+        asked for it can watch it - its bar, the log, and the failure
+        surfaces the window already owns."""
+        self._packages.remove_manager(name)
 
     # -- building --------------------------------------------------------------
 

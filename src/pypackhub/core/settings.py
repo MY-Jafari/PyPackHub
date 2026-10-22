@@ -81,6 +81,12 @@ class AppSettings:
     confirm_before_uninstall: bool = True
     confirm_before_upgrade: bool = True
     package_manager: str = "auto"
+    #: Folders the user pointed the application at explicitly - a conda
+    #: environment outside the discovered roots, a poetry/pipenv/pdm project.
+    #: Only the shape is validated here: a folder that has moved or is on an
+    #: unmounted drive stays in the file (it will come back when the drive
+    #: does) and simply does not appear in the lists while it is gone.
+    registered_environments: tuple[str, ...] = ()
 
 
 def default_settings() -> AppSettings:
@@ -112,6 +118,7 @@ def validate_settings(settings: AppSettings) -> AppSettings:
         confirm_before_uninstall=bool(settings.confirm_before_uninstall),
         confirm_before_upgrade=bool(settings.confirm_before_upgrade),
         package_manager=_as_package_manager(settings.package_manager),
+        registered_environments=_as_registered_environments(settings.registered_environments),
     )
 
     if validated.default_target_environment:
@@ -145,10 +152,50 @@ def _as_trusted_host(value: object) -> str:
     return ""
 
 
+#: Every package manager the settings may force, plus ``auto``. The names are
+#: the ones the backend factory knows (``KNOWN_BACKENDS`` in the inventory
+#: module); the two sets move together because a persisted choice the factory
+#: cannot build is a setting that lies.
+_PACKAGE_MANAGER_VALUES: Final = frozenset(
+    {"auto", "uv", "pip", "conda", "mamba", "poetry", "pipx", "pipenv", "pdm"}
+)
+
+
 def _as_package_manager(value: object) -> str:
-    if isinstance(value, str) and value in {"auto", "pip", "uv"}:
+    if isinstance(value, str) and value in _PACKAGE_MANAGER_VALUES:
         return value
     return "auto"
+
+
+def _as_registered_environments(values: object) -> tuple[str, ...]:
+    """Keep only plausible folder paths, deduplicated in first-seen order.
+
+    The entry has to be an absolute path string; whether the folder is still
+    on disk is deliberately *not* decided here - a registered project on an
+    unmounted drive should survive the load, not be silently forgotten.
+    Existence is checked where the list is used, and a folder that fails the
+    check is simply not offered.
+    """
+    if not isinstance(values, (list, tuple)):
+        return ()
+
+    kept: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        candidate = value.strip()
+        try:
+            path = Path(candidate).expanduser()
+        except (OSError, RuntimeError):
+            continue
+        if not path.is_absolute():
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        kept.append(candidate)
+    return tuple(kept)
 
 
 def settings_data_directory() -> Path:

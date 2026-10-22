@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -585,6 +586,69 @@ _WAIT_TIMEOUT: Final = 258
 #: ``WAIT_FAILED`` from the Windows API: the wait itself is broken.
 _WAIT_FAILED: Final = 0xFFFFFFFF
 
+#: How long the elevated-process handle is waited on between two looks at
+#: the output file the elevated helper writes - the streaming heartbeat.
+_ELEVATED_POLL_MS: Final = 250
+
+
+class _OutputFileTail:
+    """Follow the growth of one file, in complete lines.
+
+    The elevated helper writes the run's output to a file this process
+    created; this reads whatever is new since the last look and hands back
+    whole lines only - a progress line that arrives in halves waits for its
+    terminator rather than being shown as two broken ones. ``splitlines``
+    treats a lone carriage return as a terminator, which is what turns
+    pip's in-place download updates into one line each, the same way the
+    pipe readers of :func:`run` see them.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._offset = 0
+        self._pending = ""
+
+    def drain(self) -> list[str]:
+        """The complete lines that arrived since the last call."""
+        try:
+            with self._path.open("rb") as handle:
+                handle.seek(self._offset)
+                blob = handle.read()
+        except OSError:  # pragma: no cover - the file exists before the run
+            return []
+        self._offset += len(blob)
+        return self._feed(blob.decode("utf-8", errors="replace"))
+
+    def flush(self) -> list[str]:
+        """The unterminated remainder, as the run's final lines."""
+        remainder = self._pending
+        self._pending = ""
+        return [line for line in remainder.splitlines() if line]
+
+    def _feed(self, text: str) -> list[str]:
+        if not text:
+            return []
+        text = self._pending + text
+        self._pending = ""
+        lines = text.splitlines()
+        if not text.endswith(("\r", "\n")):
+            self._pending = lines[-1] if lines else ""
+            lines = lines[:-1] if lines else []
+        return [line for line in lines if line]
+
+
+def _elevated_helper_path() -> Path:
+    """Absolute path of the helper module an elevated run starts.
+
+    Empty when the module's file cannot be located - a frozen build, say -
+    in which case the caller falls back to elevating the command directly.
+    """
+    from pypackhub.core import elevated_helper
+
+    module_file = getattr(elevated_helper, "__file__", "") or ""
+    return Path(module_file).resolve() if module_file else Path()
+
+
 #: How long the elevated-process handle gets to disappear after a terminate,
 #: before the exit code is read anyway.
 _ELEVATED_GRACE_MS: Final = int(GRACE_PERIOD * 1000)
@@ -612,6 +676,7 @@ def run_elevated(
     *,
     timeout: float | None = DEFAULT_TIMEOUT,
     cancel: threading.Event | None = None,
+    on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     """Run one confirmed command through the OS's standard elevation mechanism.
 
@@ -622,10 +687,15 @@ def run_elevated(
 
     What is executed obeys the same rules as :func:`run`: an argument list
     only, an explicitly resolved executable, a timeout enforced against the
-    real process. What elevation cannot carry over is output - the consent
-    boundary does not pass pipes on Windows - so the result carries no
-    streamed log there and the caller tells the user that instead of
-    presenting a silent run as a feature.
+    real process. Output crosses the consent boundary the one way it can:
+    on Windows the elevated half is a stateless helper of ours that
+    redirects the approved command's output to a file this process created
+    and follows while the command runs (see
+    :mod:`pypackhub.core.elevated_helper`); on polkit the standard runner
+    reads the pipes ``pkexec`` itself provides. Either way ``on_line``
+    receives the run's real lines as they arrive - the percentages that
+    move a progress bar, the error lines that explain a failure - and the
+    result carries them for the log and the history.
 
     A user who declines the OS's prompt is reported as a cancellation for the
     same reason a stopped process is: the command never ran, and "cancelled"
@@ -636,9 +706,9 @@ def run_elevated(
     command = (executable, *arguments[1:])
 
     if os.name == "nt":
-        return _run_elevated_windows(command, timeout=timeout, cancel=cancel)
+        return _run_elevated_windows(command, timeout=timeout, cancel=cancel, on_line=on_line)
 
-    return _run_elevated_posix(command, timeout=timeout, cancel=cancel)
+    return _run_elevated_posix(command, timeout=timeout, cancel=cancel, on_line=on_line)
 
 
 def _run_elevated_windows(
@@ -646,6 +716,7 @@ def _run_elevated_windows(
     *,
     timeout: float | None,
     cancel: threading.Event | None,
+    on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     """Ask UAC to run the command, then supervise the elevated process.
 
@@ -655,6 +726,14 @@ def _run_elevated_windows(
     built with :func:`subprocess.list2cmdline` - the canonical quoting for a
     Windows argument vector - from arguments that already passed the core
     validators; no shell is involved at any point.
+
+    When the caller wants the run's output, the elevated half is
+    :mod:`pypackhub.core.elevated_helper`: the helper starts the approved
+    command with its output redirected to a file this process created,
+    this process follows the file while the command runs, and the helper
+    exits with the command's exit code. Without an ``on_line`` - or where
+    the helper file cannot be located - the command is elevated directly,
+    exactly as this runner always ran it.
     """
     import ctypes
     import importlib
@@ -699,74 +778,118 @@ def _run_elevated_windows(
     info.cbSize = ctypes.sizeof(ShellExecuteInfoW)
     info.fMask = see_mask_nocloseprocess
     info.lpVerb = "runas"
-    info.lpFile = command[0]
-    info.lpParameters = subprocess.list2cmdline(command[1:])
+
+    # The streaming route: the unprivileged process owns the file - it
+    # creates it, the elevated helper writes to it, and only these two
+    # ever see it. Every line the approved command prints arrives there
+    # and is drained into ``on_line`` while the elevated process runs.
+    tail: _OutputFileTail | None = None
+    lines: list[str] = []
+    log_path: str | None = None
+    helper = _elevated_helper_path() if on_line is not None else Path()
+
+    if on_line is not None and sys.executable and helper.is_file():
+        descriptor, log_path = tempfile.mkstemp(prefix="pypackhub-elev-", suffix=".log")
+        os.close(descriptor)
+        tail = _OutputFileTail(Path(log_path))
+        info.lpFile = sys.executable
+        info.lpParameters = subprocess.list2cmdline([str(helper), log_path, *command])
+    else:
+        info.lpFile = command[0]
+        info.lpParameters = subprocess.list2cmdline(command[1:])
     info.nShow = sw_hide
+
+    def report(new_lines: list[str]) -> None:
+        lines.extend(new_lines)
+        if on_line is None:
+            return
+        for line in new_lines:
+            # A listener that raises must not stop the supervision, for the
+            # same reason the pipe readers of :func:`run` keep draining.
+            with contextlib.suppress(Exception):
+                on_line(line)
 
     started = time.monotonic()
 
-    if not shell32.ShellExecuteExW(ctypes.byref(info)):
-        code = last_error()
-        if code == _ERROR_CANCELLED:
+    try:
+        if not shell32.ShellExecuteExW(ctypes.byref(info)):
+            code = last_error()
+            if code == _ERROR_CANCELLED:
+                return CommandResult(
+                    argv=command,
+                    returncode=-1,
+                    stdout="",
+                    stderr="",
+                    duration=time.monotonic() - started,
+                    cancelled=True,
+                )
             return CommandResult(
                 argv=command,
                 returncode=-1,
                 stdout="",
-                stderr="",
+                stderr=f"the elevated command could not be started (Windows error {code})",
                 duration=time.monotonic() - started,
-                cancelled=True,
             )
+
+        process = info.hProcess
+        if not process:  # pragma: no cover - NOCLOSEPROCESS promises a handle
+            return CommandResult(
+                argv=command,
+                returncode=-1,
+                stdout="",
+                stderr="the elevation succeeded but no process handle was returned",
+                duration=time.monotonic() - started,
+            )
+
+        deadline = None if timeout is None else started + timeout
+        timed_out = False
+        cancelled = False
+
+        while True:
+            # The file the elevated helper writes is this process's window
+            # onto the run: each pass takes what arrived since the last.
+            if tail is not None:
+                report(tail.drain())
+            state = kernel32.WaitForSingleObject(process, _ELEVATED_POLL_MS)
+            if state != _WAIT_TIMEOUT:
+                break
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                kernel32.TerminateProcess(process, 1)
+                kernel32.WaitForSingleObject(process, _ELEVATED_GRACE_MS)
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                kernel32.TerminateProcess(process, 1)
+                kernel32.WaitForSingleObject(process, _ELEVATED_GRACE_MS)
+                break
+
+        if tail is not None:
+            # Whatever the ending was, the file may hold lines the loop never
+            # saw - including the ones a killed child managed to write.
+            report(tail.drain())
+            report(tail.flush())
+
+        exit_code = wintypes.DWORD(_WAIT_FAILED)
+        kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
+        kernel32.CloseHandle(process)
+
+        returncode = -1 if exit_code.value == _WAIT_FAILED else int(exit_code.value)
         return CommandResult(
             argv=command,
-            returncode=-1,
-            stdout="",
-            stderr=f"the elevated command could not be started (Windows error {code})",
+            returncode=returncode,
+            stdout="".join(f"{line}\n" for line in lines),
+            stderr="",
             duration=time.monotonic() - started,
+            timed_out=timed_out,
+            cancelled=cancelled,
         )
-
-    process = info.hProcess
-    if not process:  # pragma: no cover - NOCLOSEPROCESS promises a handle
-        return CommandResult(
-            argv=command,
-            returncode=-1,
-            stdout="",
-            stderr="the elevation succeeded but no process handle was returned",
-            duration=time.monotonic() - started,
-        )
-
-    deadline = None if timeout is None else started + timeout
-    timed_out = False
-    cancelled = False
-
-    while True:
-        state = kernel32.WaitForSingleObject(process, 250)
-        if state != _WAIT_TIMEOUT:
-            break
-        if cancel is not None and cancel.is_set():
-            cancelled = True
-            kernel32.TerminateProcess(process, 1)
-            kernel32.WaitForSingleObject(process, _ELEVATED_GRACE_MS)
-            break
-        if deadline is not None and time.monotonic() > deadline:
-            timed_out = True
-            kernel32.TerminateProcess(process, 1)
-            kernel32.WaitForSingleObject(process, _ELEVATED_GRACE_MS)
-            break
-
-    exit_code = wintypes.DWORD(_WAIT_FAILED)
-    kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
-    kernel32.CloseHandle(process)
-
-    returncode = -1 if exit_code.value == _WAIT_FAILED else int(exit_code.value)
-    return CommandResult(
-        argv=command,
-        returncode=returncode,
-        stdout="",
-        stderr="",
-        duration=time.monotonic() - started,
-        timed_out=timed_out,
-        cancelled=cancelled,
-    )
+    finally:
+        if log_path is not None:
+            # The log file is this process's own scratch: the run is over
+            # and every line it held is in the result.
+            with contextlib.suppress(OSError):
+                Path(log_path).unlink()
 
 
 def _run_elevated_posix(
@@ -774,13 +897,15 @@ def _run_elevated_posix(
     *,
     timeout: float | None,
     cancel: threading.Event | None,
+    on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     """Run the command through polkit, or explain that there is no way to.
 
     ``pkexec`` is polkit's standard mechanism and takes an executable plus its
     argument list - no shell is involved anywhere - so the hardened runner
-    applies unchanged, output is captured for the result, and cancellation
-    works exactly like any other command's.
+    applies unchanged, and polkit carries pipes: the run streams its real
+    output exactly like any other command's, cancellation works the same
+    way, and the result carries the same log.
     """
     if sys.platform == "darwin":
         return CommandResult(
@@ -803,4 +928,10 @@ def _run_elevated_posix(
             duration=0.0,
         )
 
-    return run(("pkexec", *command), timeout=timeout, cancel=cancel)
+    return run(
+        ("pkexec", *command),
+        timeout=timeout,
+        cancel=cancel,
+        on_stdout=on_line,
+        on_stderr=on_line,
+    )

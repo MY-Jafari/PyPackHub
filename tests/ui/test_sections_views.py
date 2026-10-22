@@ -423,13 +423,27 @@ def test_delete_removes_the_snapshot(
 # -- history ---------------------------------------------------------------------
 
 
-def _recorded_task(context: UiContext, *, kind: str, names: list[str], snapshot_id: str) -> None:
-    """Run one fake changing action through the task manager, with context."""
+def _recorded_task(
+    context: UiContext,
+    *,
+    kind: str,
+    names: list[str],
+    snapshot_id: str,
+    result: CommandResult | None = None,
+) -> None:
+    """Run one fake changing action through the task manager, with context.
+
+    ``result`` stands in for what the package manager produced; the default
+    is a successful run, and the outcome tests pass the shape that failed
+    or was cancelled instead.
+    """
+    if result is None:
+        result = CommandResult(
+            argv=("pip", kind, "--", *names), returncode=0, stdout="", stderr="", duration=0.0
+        )
     context.tasks.schedule(
         f"{kind} requests",
-        lambda *_args: CommandResult(
-            argv=("pip", kind, "--", *names), returncode=0, stdout="", stderr="", duration=0.0
-        ),
+        lambda *_args: result,
         meta={"kind": kind, "names": names, "environment": str(PREFIX), "snapshot": snapshot_id},
         on_finish=lambda _id, _result: None,
     )
@@ -480,6 +494,70 @@ def test_an_action_without_a_snapshot_cannot_be_undone(
 
     view.history_list.setCurrentRow(0)
     assert not view.undo_button.isEnabled()
+
+
+def test_a_failed_command_is_recorded_as_failed(
+    qtbot, qapp: QApplication, context: UiContext, shell: WindowShell
+) -> None:
+    """The report: an upgrade failed and the history called it success.
+
+    The job that wrapped the command *finished* - the work returned a
+    result instead of raising - and the badge keyed on that. The payload
+    is the truth about the action: a non-zero exit is a failed action
+    whatever the wrapper's state says, and a history that lies about
+    outcomes is worse than no history.
+    """
+    del qapp
+    _recorded_task(
+        context,
+        kind="upgrade",
+        names=["av"],
+        snapshot_id="",
+        result=CommandResult(
+            argv=("pipx", "upgrade", "av"),
+            returncode=1,
+            stdout="",
+            stderr="Package is not installed",
+            duration=0.0,
+        ),
+    )
+    _wait_for_history(context, 1)
+
+    view = HistoryView(context=context, shell=shell)
+    view.refresh()
+    view.retranslate()
+
+    row = view.history_list.item(0).text()
+    assert EN_TABLE[TranslationKey.HISTORY_FAILED] in row
+    assert EN_TABLE[TranslationKey.HISTORY_SUCCESS] not in row
+
+
+def test_a_cancelled_command_is_recorded_as_cancelled(
+    qapp: QApplication, context: UiContext, shell: WindowShell
+) -> None:
+    del qapp
+    _recorded_task(
+        context,
+        kind="upgrade",
+        names=["av"],
+        snapshot_id="",
+        result=CommandResult(
+            argv=("pipx", "upgrade", "av"),
+            returncode=1,
+            stdout="",
+            stderr="",
+            duration=0.0,
+            cancelled=True,
+        ),
+    )
+    _wait_for_history(context, 1)
+
+    view = HistoryView(context=context, shell=shell)
+    view.refresh()
+
+    row = view.history_list.item(0).text()
+    assert EN_TABLE[TranslationKey.HISTORY_CANCELLED] in row
+    assert EN_TABLE[TranslationKey.HISTORY_SUCCESS] not in row
 
 
 # -- dashboard ---------------------------------------------------------------------

@@ -33,9 +33,15 @@ REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 #: Directories scanned by default, relative to the root.
 DEFAULT_TARGETS: Final = ("src", "scripts")
 
-#: The single module allowed to import `subprocess`. Everything else has to go
-#: through `pypackhub.core.runner`.
-SUBPROCESS_ALLOWED_FILE: Final = Path("src/pypackhub/core/runner.py")
+#: The only modules allowed to import `subprocess`. Everything else has to
+#: go through `pypackhub.core.runner`; the elevated helper is the second
+#: half of that same spawn site - the stateless process the runner starts
+#: elevated on Windows, which runs the one confirmed command the runner
+#: hands it, under the runner's rules (argument list only, no shell).
+SUBPROCESS_ALLOWED_FILES: Final = (
+    Path("src/pypackhub/core/runner.py"),
+    Path("src/pypackhub/core/elevated_helper.py"),
+)
 
 #: Dotted call targets that may never appear in the project's source.
 BANNED_CALLS: Final = {
@@ -131,10 +137,9 @@ def _collect_aliases(tree: ast.AST) -> dict[str, str]:
 
 def _check_imports(tree: ast.AST, path: Path, root: Path) -> list[Finding]:
     findings: list[Finding] = []
-    allowed = (root / SUBPROCESS_ALLOWED_FILE).resolve()
-    is_allowed_file = path.resolve() == allowed
+    allowed = {str((root / allowed_path).resolve()) for allowed_path in SUBPROCESS_ALLOWED_FILES}
 
-    if is_allowed_file:
+    if str(path.resolve()) in allowed:
         return findings
 
     for node in ast.walk(tree):
@@ -153,8 +158,9 @@ def _check_imports(tree: ast.AST, path: Path, root: Path) -> list[Finding]:
                         line=lineno,
                         rule="spawn-outside-runner",
                         message=(
-                            "only pypackhub.core.runner may import subprocess; "
-                            "everything else has to go through it"
+                            "only the hardened spawn sites (pypackhub.core.runner "
+                            "and its elevated helper) may import subprocess; "
+                            "everything else has to go through them"
                         ),
                     )
                 )

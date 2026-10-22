@@ -29,6 +29,7 @@ from pypackhub.core.backends.base import (
     UnsupportedBackendError,
 )
 from pypackhub.core.platform_guard import InterpreterFacts
+from pypackhub.core.platform_guard import inspect as inspect_prefix
 from pypackhub.core.runner import CommandFailedError, ExecutableNotFoundError, run
 
 __all__ = ["UvBackend", "find_uv", "uv_path_in_prefix"]
@@ -115,6 +116,17 @@ class UvBackend(Backend):
             return find_uv(prefix)
         except UnsupportedBackendError as error:
             raise UnsupportedBackendError("uv is not available on this system") from error
+
+    def supports_environment(self, path: Path) -> bool:
+        """uv names an interpreter with ``--python``, and a project folder has none.
+
+        The same refusal pip makes for the same reason: without an
+        interpreter to name, uv would fall back to whatever Python it finds
+        first and change an environment the user did not select.
+        """
+        if self._python is not None:
+            return True
+        return inspect_prefix(path).executable is not None
 
     # ------------------------------------------------------------------
     # Changing actions

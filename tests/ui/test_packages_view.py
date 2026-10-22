@@ -58,7 +58,8 @@ from pypackhub.ui.widgets.dialogs import (
     FallbackNotice,
     TyposquatNotice,
 )
-from pypackhub.ui.widgets.log_panel import LogPanel
+from pypackhub.ui.widgets.log_panel import LogPanel, RunOutcome
+from pypackhub.ui.widgets.toast import ToastKind
 
 pytestmark = pytest.mark.gui
 
@@ -68,9 +69,19 @@ PREFIX = Path("/fake/env").resolve()
 
 
 class FakeBackend:
-    """The little the view asks of a backend besides listing."""
+    """The little the view asks of a backend besides listing.
 
-    capability = BackendCapability(name="pip", can_install=True, can_install_user=False)
+    The capability mirrors pip's honest one, including the size column: a
+    backend whose rows can be measured. The one test that needs otherwise
+    swaps the capability out.
+    """
+
+    capability = BackendCapability(
+        name="pip",
+        can_install=True,
+        can_install_user=False,
+        can_show_sizes=True,
+    )
 
     def download_plan(self, action: PackageAction) -> CommandPlan | None:
         return None
@@ -98,6 +109,19 @@ class FakeService:
         self.fail_after_listing = False
         #: Whether the backend needs administrator rights for its actions.
         self.needs_elevation = False
+        #: The elevation answer for the action step of a bootstrap batch, the
+        #: one the real service asks the not-yet-installed backend for. None
+        #: means "answer like a pip-family tool on this environment" (locked
+        #: means elevated); a test pins the scoped backends' real answer
+        #: (pipx: never) by setting it.
+        self.assumed_elevation: bool | None = None
+        #: When set, ``execute`` returns this result verbatim - the shape a
+        #: real command produced, for the paths that only exist on failure.
+        self.run_result: CommandResult | None = None
+        #: Lines ``execute`` streams through ``on_line`` before its hold -
+        #: the shape a real manager's live output arrives in, percentages
+        #: and all.
+        self.run_lines: list[str] = []
         #: What ``execute`` was asked for, in order.
         self.elevated_calls: list[bool] = []
         #: When False, the backend cannot change what the interpreter imports
@@ -110,6 +134,11 @@ class FakeService:
         self.fallback_raises = False
         #: What ``required_backend_missing`` reports: empty means "usable".
         self.missing_backend = ""
+        #: Whether the forced manager is the right kind for this environment;
+        #: False stands for a poetry forced on a plain interpreter.
+        self.manager_applies = True
+        #: Whether the imported copy of the targets lives in the user site.
+        self.targets_user_site = False
         #: The labels of the plans ``execute`` was asked for, in order.
         self.executed: list[str] = []
         #: Whether the environment is writable; drives the bootstrap elevation.
@@ -199,6 +228,14 @@ class FakeService:
     def backend_needs_elevation(self, action: PackageAction) -> bool:
         return self.needs_elevation
 
+    def elevation_assuming_backend(self, name: str, action: PackageAction) -> bool:
+        """The real service asks the backend the batch is about to install;
+        the fake answers the way its knobs describe (see ``assumed_elevation``)."""
+        del name, action
+        if self.assumed_elevation is not None:
+            return self.assumed_elevation
+        return not self.writable
+
     def backend_can_reach_targets(self, action: PackageAction, *, backend_name: str = "") -> bool:
         if backend_name == "uv":
             return self.uv_can_reach
@@ -253,8 +290,32 @@ class FakeService:
     def required_backend_missing(self) -> str:
         return self.missing_backend
 
+    def manager_applies_to_environment(self, name: str) -> bool:
+        """Whether the forced *name* is the right kind for this environment.
+
+        Pinned by tests to False for the scope-refusal cases; True by
+        default because the fake's PREFIX is a stand-in for an environment
+        the manager can manage.
+        """
+        return self.manager_applies
+
+    def action_targets_user_site(self, action: PackageAction) -> bool:
+        """Where the imported copy lives, faked; False means the prefix."""
+        return self.targets_user_site
+
     def bootstrap_plans(self, missing: str, *, action: PackageAction) -> list[CommandPlan]:
-        """The setup commands, faked: install pip, then the tool itself."""
+        """The setup commands, faked: install pip, then the tool itself.
+
+        Mirrors the real service: pip through ensurepip, and any of the
+        pip-installable managers (uv, poetry, pipx, pipenv, pdm) as a package
+        from the index. conda and mamba raise the same refusal the real
+        service does - they are not pip packages, and an install batch for
+        them must not exist.
+        """
+        if missing in ("conda", "mamba"):
+            raise BackendError(
+                f"{missing} is not a pip package; install it from its own distribution"
+            )
         plans = [
             CommandPlan(
                 argv=("python", "-m", "ensurepip", "--upgrade"),
@@ -263,12 +324,12 @@ class FakeService:
                 backend="pip",
             )
         ]
-        if missing == "uv":
+        if missing in ("uv", "poetry", "pipx", "pipenv", "pdm"):
             plans.append(
                 CommandPlan(
-                    argv=("python", "-m", "pip", "install", "--upgrade", "--", "uv"),
+                    argv=("python", "-m", "pip", "install", "--upgrade", "--", missing),
                     action=action,
-                    label="install uv",
+                    label=f"install {missing}",
                     backend="pip",
                 )
             )
@@ -280,6 +341,29 @@ class FakeService:
             action=action,
             label=f"{name} upgrade",
             backend=name,
+        )
+
+    def action_for_manager_install(self, name: str) -> PackageAction:
+        """The install-only context, faked to match the real service."""
+        return PackageAction(kind=ActionKind.INSTALL, environment=PREFIX, specs=(name,))
+
+    def action_for_manager_removal(self, name: str) -> PackageAction:
+        """The removal context, faked to match the real service."""
+        return PackageAction(kind=ActionKind.UNINSTALL, environment=PREFIX, names=(name,))
+
+    def manager_removal_plan(self, name: str, action: PackageAction) -> CommandPlan:
+        """The removal command, faked to match the real service - including
+        the refusal for managers pip cannot remove."""
+        if name not in ("uv", "poetry", "pipx", "pipenv", "pdm"):
+            raise BackendError(
+                f"{name} is not a manager this application removes; "
+                "only the tools pip installs are removable here"
+            )
+        return CommandPlan(
+            argv=("python", "-m", "pip", "uninstall", "--yes", "--", name),
+            action=action,
+            label=f"uninstall {name}",
+            backend="pip",
         )
 
     def action_for_uninstall_many(self, names) -> PackageAction:
@@ -310,6 +394,9 @@ class FakeService:
     ) -> CommandResult:
         self.elevated_calls.append(elevated)
         self.executed.append(plan.label)
+        if on_line is not None:
+            for line in self.run_lines:
+                on_line(line)
         if self.run_hold is not None:
             # A held run stands in for a package-manager command that is
             # spending its minutes downloading and installing. It stops the
@@ -325,6 +412,8 @@ class FakeService:
         for spec in plan.action.specs:
             name, _, pinned = spec.partition("==")
             self.versions[name] = pinned or "2.32.0"
+        if self.run_result is not None:
+            return self.run_result
         return CommandResult(
             argv=plan.argv,
             returncode=0,
@@ -639,6 +728,38 @@ def test_turning_the_sizes_switch_off_drops_the_measured_sizes(
     )
 
 
+def test_a_backend_whose_rows_cannot_be_sized_hides_the_switch(
+    qtbot, view: PackagesView, service: FakeService
+) -> None:
+    """pipx's applications live in their own venvs, so the size column -
+    which measures the selected environment - could put another
+    environment's number on a pipx row. Unknown is honest; a wrong number is
+    not, so the switch is hidden and no sizes pass runs."""
+    service.backend.capability = BackendCapability(
+        name="pipx",
+        can_install=True,
+        can_show_sizes=False,
+    )
+
+    view.set_environment(PREFIX)
+
+    assert view.sizes_check.isHidden()
+    # and even the saved default cannot start a sizes pass through a
+    # switch nobody can see
+    assert view._sizes_available() is False
+
+
+def test_a_sizes_capable_backend_keeps_the_switch(
+    qtbot, view: PackagesView, service: FakeService
+) -> None:
+    """pip, uv and conda rows measure or read "unknown" - both honest - so
+    the switch stays where it always was for them."""
+    del service
+    view.set_environment(PREFIX)
+
+    assert not view.sizes_check.isHidden()
+
+
 def test_a_switch_is_stored_for_the_next_launch(
     qapp: QApplication, view: PackagesView, store: QSettingsStore
 ) -> None:
@@ -795,6 +916,564 @@ def test_a_missing_manager_is_installed_before_the_action_runs(
     )
     qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
     assert service.versions["requests"] == "2.32.0"
+
+
+def test_a_missing_pipx_is_installed_before_the_upgrade_runs(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The user's report, made concrete: pipx is forced in the settings and
+    not installed, and the upgrade asks instead of failing - "pipx is not
+    installed; install it and continue?" - then installs pipx first and runs
+    the upgrade through it. One confirmation covers the whole batch (SPEC
+    section 11.7), and the queue guarantees the order: the upgrade only
+    starts once the manager it asked for exists.
+    """
+    service.missing_backend = "pipx"
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            recorded["plan"] = plan
+            recorded["bootstrap"] = bootstrap
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    notice = recorded["bootstrap"]
+    assert isinstance(notice, BootstrapNotice)
+    assert notice.backend == "pipx"
+    assert len(notice.commands) == 2  # ensurepip, then pip install pipx
+
+    # And the reachability question did not divert the batch to a pip
+    # fallback: the fake answers like the real service for a pipx that never
+    # touches the selected environment.
+    qtbot.waitUntil(
+        lambda: service.executed == ["install pip", "install pipx", "pipx upgrade"],
+        timeout=5000,
+    )
+
+
+def test_a_missing_pipx_batch_runs_only_its_install_steps_elevated(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The report behind the rule: pipx was forced on a locked all-users
+    environment, and the upgrade ran elevated with the installation that
+    preceded it - the consent boundary carries no pipes, so the failure
+    printed as "Failed:" with nothing after it. The install steps write the
+    environment and keep the OS's help; the upgrade writes pipx's own home,
+    runs as the normal user, and its output streams - including its errors.
+    """
+    service.missing_backend = "pipx"
+    service.writable = False
+    service.assumed_elevation = False
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: True)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    qtbot.waitUntil(lambda: service.elevated_calls == [True, True, False], timeout=5000)
+    assert service.executed == ["install pip", "install pipx", "pipx upgrade"]
+
+
+def test_a_silent_failure_says_it_captured_nothing(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """ "Failed:" with nothing after it reads as the application's own bug.
+
+    A command that dies without producing a byte gets that said plainly in
+    the log and the status line, instead of an empty interpolation.
+    """
+    service.run_result = CommandResult(
+        argv=("pip", "upgrade", "requests"),
+        returncode=1,
+        stdout="",
+        stderr="",
+        duration=0.1,
+    )
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    qtbot.waitUntil(lambda: bool(messages) and view._run_task == "", timeout=5000)
+    # The sentence was on the status line; the refresh that follows a failed
+    # run may trail it with its own messages, so membership - not position -
+    # is what the run actually promised.
+    assert EN_TABLE[TranslationKey.LOG_FAILED_SILENT] in messages
+
+
+def test_an_elevated_failure_explains_its_missing_output(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The consent boundary carries no pipes: an elevated run that fails has
+    no output to show, and the log says *why* it is silent rather than
+    pretending the failure had nothing to say."""
+    service.needs_elevation = True
+    service.run_result = CommandResult(
+        argv=("uv", "pip", "install", "--upgrade", "requests"),
+        returncode=1,
+        stdout="",
+        stderr="",
+        duration=0.1,
+    )
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: True)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    qtbot.waitUntil(lambda: bool(messages) and view._run_task == "", timeout=5000)
+    assert EN_TABLE[TranslationKey.LOG_FAILED_ELEVATED] in messages
+    assert service.elevated_calls == [True]
+
+
+def test_the_elevation_refusal_names_the_missing_manager(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """pipx was forced and not installed, the environment is locked, and the
+    OS cannot elevate: the refusal names *pipx* - the manager the offer was
+    about to install - not whatever backend the service would have fallen
+    back to, and not an exception from resolving one that does not exist."""
+    service.missing_backend = "pipx"
+    service.writable = False
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: False)
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    assert not view.confirm_and_run(_upgrade_request())
+    assert messages and "pipx" in messages[0]
+    assert service.executed == []
+
+
+# -- installing a manager from the settings page ----------------------------------
+
+
+def test_a_manager_install_from_settings_runs_the_batch_and_invalidates(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The front of the story the user asked for: pick pipx in Settings, say
+    "install it now", and the install runs through the same confirm-and-run
+    path as every change - one dialog with the exact commands, the batch in
+    order - and the service re-probes afterwards so the next upgrade finds
+    pipx instead of a cached "missing"."""
+    recorded: dict[str, object] = {}
+    toasts: list[tuple[str, ToastKind]] = []
+    view.toast.connect(lambda message, kind: toasts.append((message, kind)))
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            recorded["plan"] = plan
+            recorded["bootstrap"] = bootstrap
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    view.install_manager("pipx")
+
+    notice = recorded["bootstrap"]
+    assert isinstance(notice, BootstrapNotice)
+    assert notice.backend == "pipx"
+    assert notice.install_only is True
+    # The installing command is the plan the dialog was built around; the
+    # ensurepip step rides in the notice.
+    assert recorded["plan"].label == "install pipx"
+    assert notice.commands == ("python -m ensurepip --upgrade",)
+
+    # The immediate answer to "did it start?", before any output exists.
+    started_toast = EN_TABLE[TranslationKey.LOG_INSTALLING_MANAGER].replace("%(backend)s", "pipx")
+    assert (started_toast, ToastKind.INFO) in toasts
+
+    qtbot.waitUntil(lambda: service.executed == ["install pip", "install pipx"], timeout=5000)
+    assert service.backend_state_invalidations == 1
+
+
+def test_the_settings_row_bar_follows_the_install_the_run_reports(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The manager row's run state, from the run's own numbers: the batch
+    starts it counting (an install's output carries percentages), every
+    percentage its lines report moves it, and the outcome ends it."""
+    service.run_hold = threading.Event()
+    service.run_lines = ["Collecting pipx", "Downloading pipx-1.7.0", "  61% ..."]
+    started: list[bool] = []
+    percents: list[int] = []
+    finished: list[object] = []
+    view.manager_run_started.connect(started.append)
+    view.manager_progress.connect(percents.append)
+    view.manager_run_finished.connect(finished.append)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    view.install_manager("pipx")
+    try:
+        qtbot.waitUntil(lambda: bool(started), timeout=5000)
+    finally:
+        service.run_hold.set()
+
+    qtbot.waitUntil(lambda: len(finished) == 1, timeout=5000)
+    # The batch is two commands (ensurepip, then the install itself), and
+    # each step restarts the row's bar - two starts, one outcome.
+    assert started == [True, True]
+    # 61% of one file of one package is 61% of the run's work span: the
+    # overall number the tracker justifies from the run's own lines.
+    assert percents == [48, 48]
+    assert finished == [RunOutcome.DONE]
+
+
+def test_a_failed_manager_install_ends_the_row_bar_with_the_failure(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """A manager install that fails reports the failure through the row's
+    outcome, so the settings page can turn its bar red and point at the
+    log and History for the reason."""
+    service.run_hold = threading.Event()
+    service.run_result = CommandResult(
+        argv=("python", "-m", "pip", "install", "pipx"),
+        returncode=1,
+        stdout="",
+        stderr="no network",
+        duration=0.1,
+    )
+    finished: list[object] = []
+    view.manager_run_finished.connect(finished.append)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    view.install_manager("pipx")
+    try:
+        qtbot.waitUntil(lambda: bool(service.executed), timeout=5000)
+    finally:
+        service.run_hold.set()
+
+    qtbot.waitUntil(lambda: len(finished) == 1, timeout=5000)
+    assert finished == [RunOutcome.FAILED]
+
+
+def test_a_manager_removal_takes_the_bar_that_only_animates(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """An uninstall prints nothing countable, so the row's bar can only
+    animate - the busy shape is the truthful one for it, and the run still
+    reports its outcome when it ends."""
+    service.run_hold = threading.Event()
+    started: list[bool] = []
+    finished: list[object] = []
+    view.manager_run_started.connect(started.append)
+    view.manager_run_finished.connect(finished.append)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    view.remove_manager("pipx")
+    try:
+        qtbot.waitUntil(lambda: bool(started), timeout=5000)
+    finally:
+        service.run_hold.set()
+
+    qtbot.waitUntil(lambda: len(finished) == 1, timeout=5000)
+    assert started == [False]
+    assert finished == [RunOutcome.DONE]
+
+
+def test_a_manager_install_refused_in_the_dialog_runs_nothing(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    class RefusingConfirmation:
+        confirmed = False
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", RefusingConfirmation)
+
+    view.install_manager("pipx")
+
+    assert service.executed == []
+    assert service.backend_state_invalidations == 0
+
+
+def test_a_manager_that_pip_cannot_install_is_said_not_started(
+    view: PackagesView, service: FakeService
+) -> None:
+    """conda is not a pip package; the settings-page offer refuses with the
+    same sentence the action-time flow does, and nothing runs."""
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+    toasts: list[tuple[str, ToastKind]] = []
+    view.toast.connect(lambda message, kind: toasts.append((message, kind)))
+
+    view.install_manager("conda")
+
+    assert messages and "not a pip package" in messages[0]
+    assert toasts and toasts[0][1] is ToastKind.ERROR
+    assert service.executed == []
+
+
+def test_a_manager_install_into_a_locked_environment_needs_the_os_or_is_refused(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    service.writable = False
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: False)
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    view.install_manager("pipx")
+
+    assert messages and "pipx" in messages[0]
+    assert service.executed == []
+
+
+# -- removing a manager from the settings page -------------------------------------
+
+
+def test_a_manager_removal_runs_the_command_and_invalidates(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The mirror of the install: one command, pip taking back out what it
+    put in, confirmed with its exact argv and recorded like every other
+    uninstall - and the service re-probes afterwards so the status answers
+    honestly on the next visit."""
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            recorded["plan"] = plan
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    view.remove_manager("pipx")
+
+    assert recorded["plan"].label == "uninstall pipx"
+
+    qtbot.waitUntil(lambda: service.executed == ["uninstall pipx"], timeout=5000)
+    assert service.backend_state_invalidations == 1
+
+
+def test_a_manager_removal_refused_in_the_dialog_runs_nothing(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    class RefusingConfirmation:
+        confirmed = False
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", RefusingConfirmation)
+
+    view.remove_manager("pipx")
+
+    assert service.executed == []
+    assert service.backend_state_invalidations == 0
+
+
+def test_a_manager_pip_cannot_remove_is_said_not_started(
+    view: PackagesView, service: FakeService
+) -> None:
+    """conda was not installed by pip, so pip has nothing to say about
+    removing it: the same refusal shape as the install, and nothing runs."""
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    view.remove_manager("conda")
+
+    assert messages and "not a manager this application removes" in messages[0]
+    assert service.executed == []
+
+
+def test_a_manager_removal_into_a_locked_environment_needs_the_os_or_is_refused(
+    view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    service.writable = False
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: False)
+    messages: list[str] = []
+    view.status_changed.connect(messages.append)
+
+    view.remove_manager("pipx")
+
+    assert messages and "pipx" in messages[0]
+    assert service.executed == []
+
+
+def test_an_elevated_run_gets_the_determinate_bar_because_its_output_arrives(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The report this reverses: an install into a locked environment ran
+    elevated, the consent boundary carried no pipes, no countable event
+    could arrive, and the bar sat at zero - which reads as "nothing is
+    happening" while the OS's own prompt is up. The elevated half is now
+    a helper that redirects the command's output to a file this process
+    follows, so the run's real percentages arrive like any other run's
+    and the counting bar is the honest one again."""
+    service.needs_elevation = True
+    service.run_hold = threading.Event()
+    monkeypatch.setattr(packages_module, "elevation_supported", lambda: True)
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    try:
+        qtbot.waitUntil(lambda: view._run_progress.maximum() == 100, timeout=5000)
+    finally:
+        service.run_hold.set()
+
+    qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
+
+
+def test_a_plain_run_shows_the_determinate_bar_the_manager_feeds(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The contrast: a run whose manager streams its work gets the real
+    percentage bar, filled by the events its own output reports."""
+    service.run_hold = threading.Event()
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    try:
+        qtbot.waitUntil(lambda: view._run_progress.maximum() == 100, timeout=5000)
+    finally:
+        service.run_hold.set()
 
 
 def test_a_bootstrap_into_a_locked_environment_runs_elevated_or_is_refused(
@@ -984,6 +1663,32 @@ def test_the_bootstrap_invalidates_what_was_probed_about_the_managers(
     assert view.confirm_and_run(_upgrade_request())
     qtbot.waitUntil(lambda: view._run_progress.isHidden(), timeout=5000)
     assert service.backend_state_invalidations >= 1
+
+
+def test_the_bootstrap_offer_announces_the_install_when_it_starts(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """Whichever door the install came through - this offer, or the settings
+    page's question - the first word about it is the same: a toast the
+    instant the batch begins, before any output exists to show."""
+    service.missing_backend = "uv"
+    toasts: list[tuple[str, ToastKind]] = []
+    view.toast.connect(lambda message, kind: toasts.append((message, kind)))
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+    started_toast = EN_TABLE[TranslationKey.LOG_INSTALLING_MANAGER].replace("%(backend)s", "uv")
+    qtbot.waitUntil(lambda: (started_toast, ToastKind.INFO) in toasts, timeout=5000)
 
 
 def test_declining_the_bootstrap_offer_installs_nothing(
@@ -1275,6 +1980,163 @@ def test_the_confirmation_dialog_explains_the_pip_fallback(
         dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).text()
         == EN_TABLE[TranslationKey.CONFIRM_FALLBACK_BUTTON]
     )
+
+
+def test_the_confirmation_dialog_says_when_the_manager_cannot_manage_the_environment(
+    qapp: QApplication, shell: WindowShell
+) -> None:
+    """The report: poetry was forced in the settings, and the upgrades said
+    only "run with pip" - the reason shown was about user-site shadowing,
+    which was not even true here. A manager out of its scope gets the
+    sentence that is: poetry manages project folders, and this environment
+    is not one."""
+    del qapp
+    action = _upgrade_request()
+    plan = CommandPlan(
+        argv=("python", "-m", "pip", "install", "--upgrade", "--", "requests"),
+        action=action,
+        label="pip upgrade",
+        backend="pip",
+    )
+
+    dialog = ConfirmationDialog(
+        plan=plan,
+        policy=_ok_policy(),
+        translator=shell.translator,
+        fallback=FallbackNotice(replaced="poetry", scope="project"),
+    )
+
+    assert (
+        EN_TABLE[TranslationKey.CONFIRM_FALLBACK_SCOPE_PROJECT].replace("%(backend)s", "poetry")
+        in dialog.fallback_text
+    )
+    # The scope sentence says what to do about it, not only what went wrong.
+    assert "project folder" in dialog.fallback_text
+
+
+def test_a_forced_poetry_that_cannot_manage_this_environment_falls_back_with_the_true_reason(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The reported dead-end: poetry was set in the settings, and upgrading
+    any package in the plain interpreter offered only pip - with the
+    user-site sentence, or an offer to install the poetry that was already
+    installed. The scope refusal is its own path now: the notice says why
+    poetry cannot manage this environment, and pip runs the action with
+    its own exact command."""
+    service.missing_backend = "poetry"
+    service.manager_applies = False
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            recorded["fallback"] = fallback
+            recorded["argv"] = plan.argv
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+
+    fallback = recorded["fallback"]
+    assert isinstance(fallback, FallbackNotice)
+    assert fallback.replaced == "poetry"
+    assert fallback.scope == "project"
+    # The imported copy lives in the prefix here, so pip's plan goes
+    # without --user: the flag would shadow the copy instead of changing it.
+    assert "--user" not in recorded["argv"]
+    qtbot.waitUntil(lambda: bool(service.executed), timeout=5000)
+
+
+def test_a_scope_fallback_keeps_the_user_flag_when_the_copy_lives_in_the_user_site(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The same forced poetry, a package whose imported copy lives in the
+    user site: pip's plan carries --user, because that is where the copy
+    the interpreter sees can actually be changed."""
+    service.missing_backend = "poetry"
+    service.manager_applies = False
+    service.targets_user_site = True
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    original_plan_with_backend = service.plan_with_backend
+
+    def recording_plan_with_backend(name, action):
+        plan = original_plan_with_backend(name, action)
+        recorded["argv"] = plan.argv
+        return plan
+
+    monkeypatch.setattr(service, "plan_with_backend", recording_plan_with_backend)
+
+    assert view.confirm_and_run(_upgrade_request())
+
+    assert "--user" in recorded["argv"]
+    qtbot.waitUntil(lambda: bool(service.executed), timeout=5000)
+
+
+def test_a_manager_that_does_apply_here_still_gets_the_bootstrap_offer(
+    qtbot, view: PackagesView, service: FakeService, monkeypatch
+) -> None:
+    """The scope refusal did not eat the honest bootstrap: a missing
+    manager that *can* manage this environment - a poetry missing on a
+    registered poetry project - is still installed first, then the action
+    runs through it."""
+    service.missing_backend = "poetry"
+    service.manager_applies = True
+    recorded: dict[str, object] = {}
+
+    class AcceptingConfirmation:
+        confirmed = True
+
+        def __init__(
+            self,
+            *,
+            plan,
+            policy,
+            translator,
+            elevation=None,
+            fallback=None,
+            bootstrap=None,
+            typosquat=None,
+            conflicts=None,
+            parent=None,
+        ) -> None:
+            recorded["bootstrap"] = bootstrap
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", AcceptingConfirmation)
+
+    assert view.confirm_and_run(_upgrade_request())
+
+    assert isinstance(recorded["bootstrap"], BootstrapNotice)
 
 
 # -- snapshots, undo and the plan queue ----------------------------------------

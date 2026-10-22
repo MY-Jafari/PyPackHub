@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] - 2026-10-22
 
 ### Added
 
@@ -168,4 +168,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MainWindow(shell=...)` (suppressed on that line with the reason). `ruff`,
   `black`, `mypy`, `bandit` and the banned-pattern scan are all clean again.
 
-[Unreleased]: https://github.com/MY-Jafari/PyPackHub/commits/main
+[0.1.1]: https://github.com/MY-Jafari/PyPackHub/compare/v0.1.0...v0.1.1

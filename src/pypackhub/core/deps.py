@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Literal
 
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.version import InvalidVersion
+from packaging.version import InvalidVersion, Version
 
 from pypackhub.core.metadata import InstalledMetadataIndex, normalize_name
 
@@ -534,11 +534,20 @@ def _specifier_allows(requirement: Requirement, version: str) -> bool | None:
     ``None`` means "cannot be answered": an unparsable version is not
     evidence of a conflict, and neither is a specifier with no bounds
     (which is trivially satisfied, and answered as ``True``).
+
+    The version is parsed *here* rather than trusted to ``contains`` to
+    reject: packaging raised :class:`~packaging.version.InvalidVersion` for
+    an unparsable one until its 26.x line, which answers ``False`` instead -
+    a silent change that would have turned every odd-but-installed version
+    string into a "conflict" had the test suite not been watching. Parsing
+    first keeps the rule the project's own: unparsable is not evidence,
+    whatever packaging decides to do with one.
     """
     try:
-        return requirement.specifier.contains(version, prereleases=True)
+        parsed = Version(version)
     except InvalidVersion:
         return None
+    return requirement.specifier.contains(parsed, prereleases=True)
 
 
 def find_conflicts(index: InstalledMetadataIndex) -> tuple[RequirementConflict, ...]:

@@ -45,6 +45,7 @@ from pypackhub.core.platform_guard import EnvironmentKind, inspect
 __all__ = [
     "InstalledMetadataIndex",
     "PackageMetadata",
+    "directory_writable",
     "distribution_directories",
     "normalize_name",
     "own_site_packages_directories",
@@ -278,6 +279,18 @@ def site_packages_writable(prefix: Path) -> bool:
         return True
 
     return any(_directory_is_writable(directory) for directory in directories)
+
+
+def directory_writable(directory: Path) -> bool:
+    """Whether a file can be created inside *directory* right now.
+
+    The probe behind :func:`site_packages_writable`, on its own for the
+    callers whose writable location is not a site-packages directory: a
+    project folder, which is what a project tool's commands write before
+    anything else. ``os.access`` is not the test, for the reasons
+    :func:`site_packages_writable` documents.
+    """
+    return _directory_is_writable(directory)
 
 
 def _directory_is_writable(directory: Path) -> bool:

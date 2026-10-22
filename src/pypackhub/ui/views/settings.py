@@ -18,7 +18,7 @@ half-switches language is worse than one that does not switch at all.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,12 +26,20 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
     QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from pypackhub.core.inventory import (
+    manager_available,
+    manager_installable,
+    manager_removable,
+)
 from pypackhub.core.settings import (
     AppSettings,
     ColorTheme,
@@ -41,16 +49,45 @@ from pypackhub.core.settings import (
 from pypackhub.ui.i18n.translations import TranslationKey
 from pypackhub.ui.services import UiContext
 from pypackhub.ui.views.window_shell import WindowShell
+from pypackhub.ui.widgets.log_panel import RunOutcome
 
 __all__ = ["PACKAGE_MANAGER_CHOICES", "SettingsView"]
 
+
+def _repolish(widget: QWidget) -> None:
+    """Re-evaluate a widget's property-based styling after a change.
+
+    Qt resolves attribute selectors like ``[error="true"]`` when a widget
+    is polished; setting the property afterwards does not restyle the
+    widget on its own, which is what this forces.
+    """
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+
+
 #: The package managers the user may force, in the order the combo offers them.
-#: ``auto`` is first because it is the default and the one most users want.
-PACKAGE_MANAGER_CHOICES: tuple[str, ...] = ("auto", "pip", "uv")
+#: ``auto`` is first because it is the default and the one most users want;
+#: the rest follow the order of the settings validator. The names are their
+#: own product names, shown untranslated in every language.
+PACKAGE_MANAGER_CHOICES: tuple[str, ...] = (
+    "auto",
+    "uv",
+    "pip",
+    "conda",
+    "mamba",
+    "poetry",
+    "pipx",
+    "pipenv",
+    "pdm",
+)
 
 #: How wide a control on this page is before the layout stretches it. A combo
 #: that only sizes itself to "uv" is a control nobody can aim at.
-SETTINGS_FIELD_MIN_WIDTH: int = 220
+#: The settings fields share one minimum width so the rows read as a form.
+#: Wide enough that a full sentence of description wraps within the field
+#: column instead of stretching the group box sideways.
+SETTINGS_FIELD_MIN_WIDTH: int = 280
 
 
 class SettingsView(QWidget):
@@ -59,6 +96,19 @@ class SettingsView(QWidget):
     The page is re-translated by the window's ``retranslate`` pass, so every label
     follows the current language without the page having to know when that happens.
     """
+
+    #: Emitted with the manager's name when the user picks one that is not
+    #: installed and answers "install it now". The window routes it to the
+    #: packages view, which owns the confirm-and-run path every change goes
+    #: through - the install is recorded like any other action, not a quiet
+    #: side effect of picking a combo entry.
+    manager_install_requested = Signal(str)
+
+    #: Emitted with the manager's name when the user clicks the remove
+    #: button next to an installed, pip-removable manager. Routed the same
+    #: way: the removal is a change to the environment, confirmed with its
+    #: exact command and recorded like every other uninstall.
+    manager_remove_requested = Signal(str)
 
     def __init__(
         self,
@@ -219,7 +269,42 @@ class SettingsView(QWidget):
 
         layout.addRow(QWidget(self._body))
 
+        # A settings combo commits a choice - a manager pick opens its
+        # install question, a language pick retranslates the whole window -
+        # so a scroll that merely drifted over the row must not commit
+        # anything. The wheel is ignored while the combo's list is closed;
+        # clicking first stays the only way to choose.
+        self._wheel_guarded = {
+            self._theme_combo,
+            self._language_combo,
+            self._package_manager,
+        }
+        for combo in self._wheel_guarded:
+            combo.installEventFilter(self)
+
+        # The spin boxes' numbers have to start clear of their buttons, not
+        # only after the first language switch.
+        self._align_spin_boxes()
+
     # -- construction helpers ---------------------------------------------------
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        """A settings combo does not commit on a scroll nobody asked for.
+
+        Qt's combos change their selection on a wheel event by default, so
+        a hover that drifted across the manager row could silently flip the
+        tool - and a manager flip opens install questions and re-runs
+        probes. The wheel is swallowed while the combo's list is closed;
+        once the list is open its own scrolling is left alone, and clicking
+        first remains the only way to choose.
+        """
+        if (
+            watched in self._wheel_guarded
+            and event.type() == QEvent.Type.Wheel
+            and not watched.view().isVisible()
+        ):
+            return True
+        return super().eventFilter(watched, event)
 
     def _package_manager_field(self) -> QWidget:
         """The package-manager choice, together with the sentence explaining it.
@@ -236,6 +321,27 @@ class SettingsView(QWidget):
         field.setSpacing(4)
         field.addWidget(self._package_manager)
 
+        # The manager row's progress bar: small, quiet, and only there while
+        # the row has something to report. An install the user asked for
+        # here fills it with the percentages the run's own output carries;
+        # a failure turns the whole bar red, so the answer to "what
+        # happened to my install?" is on the page that started it - while
+        # the log below holds the lines and History holds the record.
+        self._manager_progress = QProgressBar(container)
+        self._manager_progress.setObjectName("managerProgressBar")
+        self._manager_progress.setTextVisible(False)
+        self._manager_progress.setFixedHeight(6)
+        self._manager_progress.setVisible(False)
+        field.addWidget(self._manager_progress)
+
+        # Real air between the control and its sentence. The layout's 4px
+        # is all that separates the combo from the hint below it once the
+        # bar hides - and a focused combo paints its accent border at that
+        # very edge, so at high DPI the first description line reads as
+        # drawn through the box itself, which is exactly the reported
+        # "the description goes into the selection box".
+        field.addSpacing(10)
+
         self._package_manager_hint = QLabel(container)
         self._package_manager_hint.setObjectName("settingsHint")
         self._package_manager_hint.setWordWrap(True)
@@ -246,17 +352,54 @@ class SettingsView(QWidget):
         # Registered under its key, so the language switch re-renders it with the
         # rest of the page rather than leaving one English sentence behind.
         self._labels[TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT] = self._package_manager_hint
+
+        # The live answer to "is my choice installed?" - rendered for the
+        # current choice, hidden for ``auto`` (which names no single tool).
+        self._package_manager_status = QLabel(container)
+        self._package_manager_status.setObjectName("settingsHint")
+        self._package_manager_status.setWordWrap(True)
+        self._package_manager_status.setVisible(False)
+        field.addWidget(self._package_manager_status)
+
+        # Offered only for an installed manager pip can remove: the button's
+        # whole promise is "take back out what pip put in", so it appears
+        # only where that is exactly true.
+        self._manager_remove_button = QPushButton(container)
+        self._manager_remove_button.setObjectName("secondaryText")
+        self._manager_remove_button.setAutoDefault(False)
+        self._manager_remove_button.setVisible(False)
+        self._manager_remove_button.clicked.connect(self._remove_manager_clicked)
+        field.addWidget(self._manager_remove_button)
         return container
 
+    def _remove_manager_clicked(self) -> None:
+        """Route the removal to the confirm-and-run path, by name."""
+        choice = str(self._package_manager.currentData() or "auto")
+        self.manager_remove_requested.emit(choice)
+
     def _group(self, layout: QFormLayout, key: TranslationKey) -> QFormLayout:
-        """Add a titled group box for *key* and return its form layout."""
+        """Add a titled group box for *key* and return its form layout.
+
+        The insets live here, in the layout's own contents margins, and not
+        in a stylesheet ``padding``: Qt's group-box box model lets the
+        stylesheet padding fight - and silently win over - the margins a
+        layout sets, which is how the box ended up hugging its last row so
+        tightly that the description text read as sunk into the border. The
+        generous bottom inset is the fix for that: the last line clears the
+        frame at every scale, and the wider spacing gives the rows room to
+        be a panel rather than a list.
+        """
         box = QGroupBox(self._body)
         box.setObjectName("settingsGroup")
         box.setTitle(self._shell.text(key))
         inner = QFormLayout(box)
-        inner.setContentsMargins(12, 18, 12, 12)
-        inner.setSpacing(8)
-        layout.addWidget(box)
+        inner.setContentsMargins(20, 26, 20, 22)
+        inner.setVerticalSpacing(12)
+        # The group spans the whole row, not the form's field column: a box
+        # sized by its contents' own widths came out ragged - one group as
+        # narrow as its shortest row, another as wide as its longest - and
+        # every one of them too small for the settings it held.
+        layout.addRow(box)
         self._groups[key] = box
         return inner
 
@@ -300,8 +443,9 @@ class SettingsView(QWidget):
     def _package_manager_label(self, choice: str) -> str:
         """What one package-manager entry says in this language.
 
-        Only ``auto`` needs a sentence: pip and uv are their own names in every
-        language, and translating them would make the entry harder to recognise.
+        Only ``auto`` needs a sentence: every other entry is a product name
+        (pip, uv, conda, mamba, poetry, pipx, pipenv, pdm) and translating it
+        would make the entry harder to recognise, not easier.
         """
         if choice == "auto":
             return self._shell.text(TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO)
@@ -330,6 +474,12 @@ class SettingsView(QWidget):
             )
         finally:
             self._loading = False
+        # The restored choice is reported, never questioned: the honest
+        # state belongs on the page from the moment it appears, and the
+        # "install it now?" prompt is a selection's question - the report
+        # behind the guard was the question greeting the user before the
+        # window did.
+        self._render_manager_status(settings.package_manager)
 
     def current_settings(self) -> AppSettings:
         """Return the settings the controls currently describe, validated."""
@@ -348,6 +498,11 @@ class SettingsView(QWidget):
                 show_sizes_by_default=self._show_sizes.isChecked(),
                 show_outdated_by_default=self._show_outdated.isChecked(),
                 package_manager=self._package_manager.currentData(),
+                # Not edited on this page, but it is a *setting*: rebuilding
+                # the whole object from the controls alone would reset it on
+                # every save, silently forgetting every folder the user
+                # registered on the environments page.
+                registered_environments=self._shell.settings.registered_environments,
             )
         )
 
@@ -362,8 +517,145 @@ class SettingsView(QWidget):
         self.apply_current_settings()
 
     def _on_package_manager_changed(self, _index: int) -> None:
-        """The user picked a package manager; persist and rebuild the provider."""
+        """The user picked a package manager; persist, rebuild, and tell them
+        what they just picked.
+
+        The ``_loading`` guard is the whole difference between a selection
+        and a restore: ``load_settings`` sets the combo to the stored
+        choice, and a restored choice must never ask its question - the
+        report was the question appearing before the window did, because
+        the handler guarded its save but not its prompt.
+        """
+        if self._loading:
+            return
+        choice = str(self._package_manager.currentData() or "auto")
+        # A new selection is a new subject: whatever the last run left on
+        # the row's bar - a red failure, a stalled percentage - belongs to
+        # the choice the user just left, not to this one.
+        self._reset_manager_progress()
         self.apply_current_settings()
+        self._update_manager_status(choice)
+
+    # -- the manager row's run ------------------------------------------
+
+    def _reset_manager_progress(self) -> None:
+        """Take the row's bar back to its resting state: hidden, not red."""
+        bar = self._manager_progress
+        bar.setProperty("error", False)
+        bar.setVisible(False)
+        _repolish(bar)
+
+    def show_manager_run(self, determinate: bool) -> None:
+        """Reveal the row's bar for a run the user started from this page.
+
+        ``determinate`` is the run's own answer to whether its output can
+        be counted: an install's download and install lines carry
+        percentages, so the bar fills with the run's real progress; a
+        removal prints nothing countable, so the bar animates instead of
+        pretending to a percentage that will never arrive.
+        """
+        bar = self._manager_progress
+        bar.setProperty("error", False)
+        bar.setRange(0, 100 if determinate else 0)
+        bar.setValue(0)
+        bar.setVisible(True)
+        _repolish(bar)
+
+    def set_manager_progress(self, percent: int) -> None:
+        """Move the row's bar to the percentage the run itself reported."""
+        self._manager_progress.setValue(percent)
+
+    def finish_manager_run(self, outcome: RunOutcome) -> None:
+        """End the row's bar the way the run actually ended.
+
+        A failure turns the whole bar red and leaves it there - the row's
+        word for "ask the log and History why" - and anything else (done,
+        or stopped by the user) simply puts the bar away. Either way the
+        one-line state underneath is re-probed: an install that succeeded
+        has changed the answer, and a red bar over a freshly honest
+        status is exactly the report the row exists to give.
+        """
+        bar = self._manager_progress
+        if outcome is RunOutcome.FAILED:
+            bar.setProperty("error", True)
+            _repolish(bar)
+        else:
+            self._reset_manager_progress()
+        self._render_manager_status(str(self._package_manager.currentData() or "auto"))
+
+    def _update_manager_status(self, choice: str) -> None:
+        """Render the chosen manager's state, and ask the question a missing
+        one deserves.
+
+        Called for user selections only: the check happens the moment the
+        user commits to a tool, so an uninstalled one is met here - with the
+        offer to fix it - rather than at the next upgrade. The availability
+        probe is resolution only - a PATH walk, no process spawned - which
+        is why asking here does not need a worker thread.
+        """
+        self._render_manager_status(choice)
+
+        if choice == "auto" or manager_available(choice):
+            return
+        if not manager_installable(choice):
+            # A question this application cannot act on is not asked: the
+            # row already says where a non-pip manager comes from, and a
+            # "yes" that could only be answered with a refusal wastes the
+            # click it takes - the reported dead-end of "I said install
+            # and nothing happened".
+            return
+
+        answer = QMessageBox.question(
+            self,
+            self._shell.text(TranslationKey.CONFIRM_BOOTSTRAP_TITLE, backend=choice),
+            self._shell.text(TranslationKey.SETTINGS_MANAGER_INSTALL_QUESTION, backend=choice),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            # ``==`` and not ``is``: PySide6's static ``QMessageBox.question``
+            # answers with the button's *value* (a plain int), not the enum
+            # member, so an identity comparison silently ignored every real
+            # "Yes" ever clicked - the reported dead-end of "I said install
+            # and nothing happened". The tests mock the question with the
+            # int form for exactly this reason.
+            self.manager_install_requested.emit(choice)
+
+    def _render_manager_status(self, choice: str) -> None:
+        """Show the honest one-line state of the chosen manager - no question.
+
+        This is the restore path: ``load_settings`` and the language switch
+        call it, because a page should say what is installed the moment it
+        appears, and only a *selection* may ask whether to install more.
+
+        The remove button follows the same answer: it appears only for an
+        installed manager pip can remove, because its whole promise is
+        "take back out what pip put in".
+        """
+        status = self._package_manager_status
+        if choice == "auto":
+            status.setVisible(False)
+            self._manager_remove_button.setVisible(False)
+            return
+
+        installed = manager_available(choice)
+        if installed:
+            key = TranslationKey.SETTINGS_MANAGER_STATUS_INSTALLED
+        elif not manager_installable(choice):
+            # The honest state of a manager this application cannot
+            # install: where it comes from, instead of a "missing" that
+            # invites an install nothing can perform.
+            key = TranslationKey.SETTINGS_MANAGER_NOT_INSTALLABLE
+        else:
+            key = TranslationKey.SETTINGS_MANAGER_STATUS_MISSING
+        status.setText(self._shell.text(key, backend=choice))
+        status.setVisible(True)
+
+        removable = installed and manager_removable(choice)
+        self._manager_remove_button.setText(
+            self._shell.text(TranslationKey.SETTINGS_MANAGER_REMOVE, backend=choice)
+        )
+        self._manager_remove_button.setVisible(removable)
 
     def apply_current_settings(self) -> None:
         """Validate the controls' current values and persist them."""
@@ -434,6 +726,32 @@ class SettingsView(QWidget):
         self._package_manager.setToolTip(
             self._shell.text(TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT)
         )
+
+        # The manager status line follows the language for the *current*
+        # choice, without re-asking its question: a language switch is not
+        # a selection, and the answer that was given stands.
+        current = str(self._package_manager.currentData() or "auto")
+        self._render_manager_status(current)
+        self._align_spin_boxes()
+
+    def _align_spin_boxes(self) -> None:
+        """Keep the spin boxes' numbers clear of their buttons.
+
+        Qt draws a spin box's text left-aligned whatever the layout
+        direction is, but it mirrors the up/down buttons to the left in a
+        right-to-left layout - so in Persian the number was painted
+        underneath the buttons and its first digit disappeared behind
+        them. Aligning the text with the far edge puts it away from the
+        buttons in both directions: the buttons sit on the right in a
+        left-to-right layout and on the left in a right-to-left one.
+        """
+        alignment = (
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            if self._shell.is_rtl
+            else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        for spin in (self._page_size, self._sidebar_width):
+            spin.setAlignment(alignment)
 
 
 def _lines(text: str) -> tuple[str, ...]:

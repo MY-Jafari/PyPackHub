@@ -13,7 +13,7 @@ we deliberately deviate from it, and why.
 | --- | --- | --- |
 | Distribution, import and CLI name | `pypackhub` | The repo directory is `PyPackHub` and the spec title says *PyPackHub*, but the spec body repeatedly writes `pyphackhub` — clearly a typo propagated through the document. Both names were free on PyPI at the time of writing. |
 | Display name | `PyPackHub` | Window titles, about dialog, README headings. |
-| Version | `0.1.0`, classifier `Development Status :: 2 - Pre-Alpha` | Nothing is released yet. |
+| Version | `0.1.1`, classifier `Development Status :: 2 - Pre-Alpha` | The number lives in `pyproject.toml` alone: the release workflow refuses a tag that disagrees with it, because the same number is baked into the executable's version resource and shown in the About box. |
 | License | GPL-3.0-only | The repository already carried the GPL-3.0 text in `LICENSE`. PySide6 is LGPLv3/GPLv3, so the combination is compatible. |
 | Repository layout | `src/pypackhub/` | The spec diagram shows a flat `pyphackhub/`; `src/` guarantees tests import the installed distribution instead of the checkout. |
 | Build backend | Hatchling | Modern, handles `src/` layout and package data (the bundled fonts) with almost no configuration. |
@@ -365,6 +365,15 @@ requirement with no range constrains nothing. Before a pinned install or a
 downgrade the same arithmetic runs against the *incoming* version, which is
 the "impact warnings before any change" the spec asks for.
 
+The "unparsable is not evidence" rule is enforced by the project's own
+``Version()`` parse, not by packaging's: ``SpecifierSet.contains`` used to
+raise for an unparsable version, and the 26.x line answers ``False``
+instead - a silent semantics change that would have turned every
+odd-but-installed version string into a "conflict". The change was caught
+because PyPackHub's own pipx bootstrap upgraded ``packaging`` on the
+machine running the test-suite, which is either the best or the worst
+possible way to find out.
+
 **Disk usage is measured, not estimated, and inspection is all it does.**
 The environment total walks the whole prefix (interpreter, metadata,
 everything a package dropped outside its own ``RECORD``), the largest
@@ -374,4 +383,333 @@ subprocess spawned to ask. Unreadable parts lower the total and are
 remembered, so the number renders as a floor when it is one. Nothing on the
 page deletes anything: clearing a cache is a change to the machine and
 belongs behind a confirmation like every other change.
+
+## Notes on phase 3: the five new managers
+
+**One contract, seven adapters.** ``base.py`` named conda, poetry, pipx,
+pipenv and pdm in its docstring from the day it was written; this phase made
+the names real. Each manager is one small module that knows its command
+vocabulary, its listing format and what it honestly cannot do, and everything
+else - validation, confirmation, execution, snapshots, history - already
+worked because it was written against the contract rather than against pip.
+
+**A manager never runs where it cannot act.** The new
+``Backend.supports_environment()`` hook is the guard the settings page
+needed: conda refuses anything without ``conda-meta``, the project tools
+refuse anything without their own marker files, and pip and uv refuse a
+project folder - without it, a forced pip against a project would fall back
+to a PATH pip belonging to some *other* prefix and install into the wrong
+place while the confirmation showed an honest-looking command. The factory
+asks before it hands a backend out; the listing path asks too.
+
+**A project folder is a registered location, never a deletable one.**
+``EnvironmentKind.PROJECT`` recognises poetry/pipenv/pdm projects by the
+files their tools actually write (``Pipfile``, ``[tool.poetry]``,
+``pdm.lock``), and the environments page can point the application at one.
+Two guards follow from what a project *is*: ``ensure_deletable_environment``
+refuses it - the "delete the environment" affordance must never destroy the
+user's source code - and a plain ``pyproject.toml`` without a tool's markers
+is nobody's project, because none of the tools would know what to do with it.
+Registering is remembering: "Forget" edits the list, nothing on disk.
+
+**Project tools run in the project, and the plan says so.** poetry, pipenv
+and pdm find their target by directory, so their plans carry ``cwd`` - a new
+field on ``CommandPlan``, travelled by the single execution path, so the
+command confirmed is the command run *in the project it named*. ``poetry add``
+also writes ``pyproject.toml`` and the lock file; the module docstring says
+so plainly because that is what the word "install" means to a poetry user,
+and the confirmation shows exactly that command.
+
+**"Automatic" is the environment's own answer.** The preference order is
+computed per location: a conda environment reaches for mamba then conda -
+conda's listing is the only complete one there, since pip cannot see conda's
+metadata - with the pip family behind for a conda env with no conda
+installed; a project folder asks only its own tool; virtual environments
+keep the documented uv-first order.
+
+**pip's flags stay pip's.** ``--index-url`` and friends are carried only on
+pip and uv plans. conda has channels, poetry and pdm have sources, and a
+confirmed command the tool refuses to parse is worse than no command.
+
+**The bootstrap tells the truth about what pip can install.** poetry, pipx,
+pipenv and pdm are index packages, so the existing install-first flow covers
+them. conda and mamba are not, and are refused with the sentence that says
+where they come from instead of an offer that could never work. The batch's
+elevation is decided per step: the install steps write the environment and
+follow its blanket answer, while the action's own step is judged by the
+backend it will run through. The report that taught the distinction: a pipx
+forced on a locked all-users environment had its upgrade elevated with the
+installation that preceded it, and the consent boundary - which carries no
+pipes - turned the failure into "Failed:" with nothing after it. A pipx
+action never needs the help; a uv action on the same environment keeps it.
+The same run's empty failure line taught the log one more sentence: a
+failure that captured nothing says why - elevated means no pipes, anything
+else means the command died silent - instead of interpolating an empty
+string.
+
+**The bootstrap offer must survive the state it exists for.** The offer is
+made precisely when no manager resolves, so nothing on the way to it may
+resolve one either: the policy question falls back to the platform guard's
+own answer for the prefix when there is no backend to ask, and the
+elevation-refusal message names the *missing* manager rather than asking
+the service which backend it fell back to. The report: with a forced pipx
+that was not installed, the confirm path asked for the policy before
+asking what was missing - the resolution raised, and the offer died before
+the user ever saw it.
+
+**The manager choice is checked where it is made.** Picking a manager in
+the settings page is the moment the user commits to a tool, so that is the
+moment the tool's state is reported: an installed one says so under the
+combo, and a missing one is offered to be installed right there. The
+offer is a question, never an action - the install itself runs through
+the packages view's confirm-and-run path like every change (exact command,
+log, history, snapshot), routed by signal rather than by the settings page
+growing a private execution path of its own. The install-only batch
+reuses the bootstrap machinery with the installing command as the plan the
+dialog is built around, and its history row records the manager's name
+under an ordinary "install" kind. The check itself is resolution only -
+a PATH walk, no process spawned - which is why the settings page can ask
+it on the GUI thread, and a language switch re-renders the status without
+re-asking its question, because a switch is not a selection.
+
+**Removal is the mirror of installation, and the row that asked is the
+row that watches.** An installed manager that pip put there is offered
+for removal with one confirmed `pip uninstall` - the same command shape,
+log, history and snapshot as any uninstall - and the offer is narrowed
+to exactly the managers pip installed, because the tool that put a
+manager somewhere is the tool that can take it back out: conda and
+mamba were not installed by pip, and pip is not offered at all, since
+removing the baseline every bootstrap path starts from is a consequence
+no settings row should promise. Both routes - install and remove - run
+where the user already is, on the settings page that asked: the manager
+row owns a small progress bar of its own, a few pixels under the combo,
+which fills with the install's real percentages and turns the danger
+colour whole when the run fails, and the window-wide log panel opens
+below whichever page is showing. The earlier design moved the user to
+the Packages page, because that was where a run was visible; the honest
+fix turned out to be the other shape - give the row its own bar and let
+the user stay where they made the decision. There is still exactly one
+place that knows how a run is going (the one run path feeds both bars);
+there are now two honest places to watch it from.
+
+**A restored choice is reported, a selected one is asked.** The settings
+page restores the stored manager into its combo on startup, and the
+change handler originally guarded its *save* against the restore but not
+its *prompt* - so a stored, uninstalled manager greeted the user with
+"install it now?" before the window had appeared. Rendering the state
+and asking the question are now separate: every restore (startup, a
+save, a language switch) renders the honest one-line state without
+asking, and only a selection - the user committing to a tool - may ask.
+
+**A question this application cannot act on is not asked.** The second
+dead-end in the same settings row: picking conda or mamba asked
+"install it now?", the user said yes - and nothing happened, because the
+only honest answer was a refusal ("it is not a pip package") that
+arrived as a toast and a status line on a page the user was not looking
+at. Asking was the bug: a dialog whose every "yes" ends in "no" is a
+click wasted and a promise broken. The page now knows what the bootstrap
+can install (`manager_installable`) and asks only there; a manager it
+cannot install renders the sentence about where that manager comes from
+- conda from docs.conda.io, mamba from its own docs - in the row itself,
+where the question used to be. The install path keeps its refusal for
+any other caller, and its own unreachable-silence branch now speaks.
+
+**A real answer is an int, and the mock answered an enum.** The third
+dead-end in the same row was the deepest: the question *was* honest
+(poetry is pip-installable), the dialog *did* appear, the user *did*
+click Yes - and the click vanished. PySide6's static
+``QMessageBox.question`` answers with the button's *value* - a plain
+``int`` - and the handler compared it with ``is`` against the enum
+member, so the comparison was False for every real click ever made. The
+tests never saw it because they mocked ``question`` to return the enum
+member: the mock answered in a form the real dialog never sends, and a
+test that mocks an API should mock the shape the platform actually
+returns - the regression mock now returns ``int(StandardButton.Yes)``.
+What found it was not a test at all but a real-platform driver: build
+the real window, click the real modal buttons with armed timers, and
+follow the trace - the offscreen suite reproduces wiring, but only the
+real platform reproduces what the platform's own dialogs return.
+
+**Out of scope is not missing, and must not be sold as either.** The
+fourth report from the same settings row: poetry was forced, and every
+upgrade said only "run with pip" - or offered to *install* the poetry
+that was already installed. The service answered "poetry is missing"
+because ``supports_environment`` refuses plain interpreters, and the UI
+treated every refusal as absence. Two different truths were collapsed
+into one: a manager that is not *installed* can be installed, but a
+manager that is not the right *kind* for this environment never becomes
+right by installing it. The service now answers the kind question on
+its own (``manager_applies_to_environment``, judged from the
+environment's markers, installed or not), the bootstrap offer only
+fires for managers that could actually manage the environment once
+installed, and the rest reach the pip fallback with the sentence that
+is true: poetry manages project folders, conda manages conda
+environments, and this is neither - with what to do about it (register
+the project, open it there) instead of an explanation of a shadowing
+that is not the reason. The settings hint stopped promising that a
+forced name applies to every environment; it now says the manager is
+used wherever it can manage, and that elsewhere the action says so and
+offers pip.
+
+**A focus border is part of the box it surrounds.** The last report from
+the same row: the description text "went into" the selection box. The
+layout audit showed no overlap anywhere - at any window size, the first
+sentence sat a layout-spacing below the combo - but a *focused* combo
+paints its accent border at the very edge of that spacing, and at high
+DPI the 4px gap reads as 2, which reads as a text line drawn through
+the box's own border. The fix is air: a real spacer between the
+control and its sentence, so the two are separate at every scale the
+OS knows how to render. The lesson for the audit that found "nothing
+wrong": geometry proves no overlap, but perceived overlap is about the
+distance between two inks, and a focus ring is ink.
+
+**A group box is a panel, not a field.** The screenshot after that one
+widened the complaint: the boxes themselves were too small, and the
+description at the bottom of the Behaviour box read as sunk into the
+frame. Two causes, both structural. The groups were added to the page's
+form with ``addWidget`` - which puts a widget in the form's *field
+column* - so each box was sized by its own contents' width and the
+page showed four ragged columns of settings (399px, 505px, 673px,
+1246px wide on the same page). And the group's insets lived in a
+stylesheet ``padding`` on ``QGroupBox``, which Qt's box model lets
+silently override the margins a layout sets - so the content met the
+frame with almost nothing between them. ``addRow`` spans the row: every
+box is now full-width and uniform, the insets live in the layout's own
+contents margins where nothing overrides them, and the manager field
+alone grew from 479px to 1064px of room for its sentences.
+
+**A settings combo does not commit on a scroll nobody asked for.**
+Qt's combos change their selection on a wheel event by default, so a
+hover that drifted across the manager row could silently flip the
+tool - and a manager flip opens install questions and re-probes the
+machine. The three settings combos swallow wheel events while their
+lists are closed; clicking first remains the only way to choose, which
+is what a user means when they say the choice should "stay until I
+click on it".
+
+**A run that starts is a run that can be watched.** The log panel starts
+hidden as a layout choice for an empty window, and a manager install
+into a locked environment runs elevated - which, before the file-tail
+below, meant no countable event could ever arrive. Together those made
+an install invisible: a determinate bar stuck at zero (the honest
+reading of which is "nothing is happening"), a log nobody could see, and
+no word that anything had started. Three answers: the window reveals
+the log the moment any confirmed run starts, an install announces
+itself with a toast the instant it begins - before any output exists to
+show - and the bar counts what the run actually reports, elevated or
+not. The toast comes from both doors an install can enter by - the
+settings page's question and the bootstrap offer at action time -
+because the word "installing" belongs to the batch, not to the door.
+
+**Elevated output crosses the consent boundary through a file.** The
+one thing elevation on Windows never carried was output: no pipes cross
+the UAC boundary, so an elevated install was silent by construction -
+no percentage for a bar, no error line for a log, and a history whose
+"why" was a guess. The boundary still carries no pipes, and that rule
+is not circumvented; what crosses it is a file. The runner now starts
+its own stateless helper elevated (`pypackhub.core.elevated_helper`):
+the helper runs the one approved command, argv for argv, with its
+output redirected to a log file the unprivileged process created and
+follows while the command runs, then exits with the command's own exit
+code. The rules survive the crossing unchanged - argument list only,
+no shell anywhere, the executable already resolved before the line was
+built, and the helper refuses anything but an absolute path, so no
+lookup happens on the elevated side that this application does not
+control. The helper is the second file the security scanner allows to
+import subprocess, and that exception is the scanner's docstring to
+explain: it is not a second spawn policy, it is the other half of the
+same one. Two details earn their place in the same breath: the child
+joins a Windows job object with kill-on-close, so cancelling the helper
+takes the tree with it and a stopped run cannot leave a half-watched
+install finishing in the dark; and the file the elevated side writes
+is created by and owned by the unprivileged side, deleted when the run
+ends, and never read by anything but the run that made it.
+
+**One checked page button, and it is the page you are on.** The nav
+buttons are checkable, so a click checks its own; unchecking the page
+the user just left is the window's job, and for a stretch of this
+session that job was missing - the loop that did it had been severed
+into an unrelated method when the settings-routing methods were
+inserted into the middle of `show_view`'s body, and every page ever
+visited stayed checked. The window tests never caught it because none
+of them asserted a checked state; now the page-switch tests do, and
+the rule they pin is: exactly one checked page button, the one showing.
+The log entry is the deliberate exception - it is a toggle for a panel,
+not a page, so its checked state reports the panel's visibility across
+every page switch, including the moment a run opens the log on its
+own. A toggle's checked state is the one thing it can never lie about.
+
+**History records the action, not the job.** A task whose work function
+returns a result is a *finished* job even when the result says the command
+failed - and the history badge keyed on the job's state, recording a failed
+upgrade as a success. The badge now derives from the payload: a non-zero
+exit is a failed action, a cancelled one is cancelled, and only a payload
+that says otherwise is a success. A history that lies about outcomes would
+be worse than none: it is the record a user checks the next morning.
+
+**A test-suite is an environment, and it must not depend on the machine's
+disk.** The window tests pinned the environments *page's* discovery but
+not the switcher's, which reaches the same roots through the provider - so
+every window test walked the machine's real home on a worker thread, and
+a slow morning's disk meant workers outliving the windows that scheduled
+them, and intermittent hard crashes mid-suite. The provider's scan is
+pinned for those tests now, and the task manager logs a raising result
+callback instead of letting it kill the worker thread: the callback runs
+after the result is recorded, so there is nothing downstream left to
+break, and a bug in a view's callback belongs in the log, not in an
+unhandled threading traceback.
+
+**pipx is scoped, not located.** Its applications live in its own home, so
+its commands ignore the selected environment, its policy never demands the
+OS's help (it only ever writes inside the user's own directories), its
+listing reports the pipx home as the packages' location, its size column is
+hidden rather than joining pipx's app names against another environment's
+measurements, downgrade is refused because pipx has no command that
+re-pins a version - a confirmation the tool cannot honour is not offered -
+and the reachability question is answered as the vacuous one it is
+(``targets_selected_environment=False``), so a user-site shadowing copy in
+the *selected* environment never turns a pipx the user chose into a pip
+fallback.
+
+**Unparsable output is an error, not an empty project.** conda, pipx and
+pipenv answer in JSON (pipenv deliberately through ``pipenv run pip list``,
+one shape, one parser); poetry and pdm answer in text, parsed with guards -
+a row counts only when its second token is a version - and output that reads
+to nothing while the command succeeded is reported as an error, because
+"nothing installed" and "could not read the answer" must never look the same.
+
+**A mirrored control moves; the text under it does not.** The Persian pass
+found a defect the English screenshots could never show: a spin box draws
+its number left-aligned whatever the layout direction is, but its up/down
+buttons mirror to the left in a right-to-left layout - so the number was
+painted *underneath* the buttons and its first digit disappeared behind
+them. The fix is not a style rule but an alignment: the text goes to the
+far edge, away from wherever the buttons ended up. The general form of the
+lesson: a widget that mirrors itself in RTL is only half of the story - the
+plain text inside it has to be told where to stand, or the two collide.
+
+**A language is reviewed in its own script, not in translation.** The
+Persian strings are read as Persian - grammar, meaning, and the direction
+the sentence actually points. Two defects survived an English-only review:
+a dropped letter turned "conda" into "cond" inside a sentence, and a
+message about elevated runs claimed their output could not be captured,
+which stopped being true the moment the elevated helper began streaming it.
+A sentence about a page names that page exactly as the interface names it
+(«محیط‌ها», not an approximation), Latin tokens inside a Persian sentence
+carry their direction marks, and the invisible ones are escapes rather than
+raw characters - so the source stays reviewable and the rendering stays
+right-to-left.
+
+**Consciously deferred.** Channel search for conda (the search view stays
+PyPI-based; conda lookups there are advisory the same way every listing-based
+check is), conda environment *creation* in the environments view, binding a
+project folder to its interpreter for the metadata-driven panels (a project
+has no interpreter at its root, so the dependency graph and the detail panel
+show the tool's own listing rather than import-time facts), per-manager
+progress parsing (the busy bar stays honest where a manager emits no
+countable events), pipx-aware requirements import (``pipx install`` is per
+application, so a many-spec batch is not a thing pipx has), and pdm's /
+pipenv's cache directories in the disk-usage panel (their documented
+locations are less stable across versions than the ones reported today).
+
 

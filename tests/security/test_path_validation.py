@@ -143,6 +143,49 @@ def test_a_path_outside_the_environment_is_refused(tmp_path: Path) -> None:
     assert info.value.reason is Reason.OUTSIDE_ROOT
 
 
+# -- project folders are registered, never deleted -------------------------------
+
+
+def test_a_poetry_project_is_a_verified_location(tmp_path: Path) -> None:
+    """The registry may point the tools at a project; that is the one way to
+    reach poetry, pipenv and pdm."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[tool.poetry]\n", encoding="utf-8")
+
+    assert is_verified_environment(project) is True
+
+
+def test_a_pipenv_project_is_a_verified_location(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "Pipfile").write_text("[packages]\n", encoding="utf-8")
+
+    assert is_verified_environment(project) is True
+
+
+def test_a_plain_library_folder_is_not_verified(tmp_path: Path) -> None:
+    folder = tmp_path / "lib"
+    folder.mkdir()
+    (folder / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+
+    assert is_verified_environment(folder) is False
+
+
+def test_a_project_is_never_deletable(tmp_path: Path) -> None:
+    """A project is the user's source code. "Forget" only edits the list;
+    the delete affordance does not exist for it, and this guard is why."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[tool.poetry]\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError) as info:
+        ensure_deletable_environment(project)
+
+    assert info.value.reason is Reason.FORBIDDEN_TARGET
+    assert "project folder" in str(info.value)
+
+
 def test_a_symlink_out_of_the_environment_is_refused(tmp_path: Path) -> None:
     environment = make_virtual_environment(tmp_path / "env")
     outside = tmp_path / "outside"

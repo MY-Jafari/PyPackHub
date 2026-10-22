@@ -221,6 +221,13 @@ class TranslationKey(str, Enum):
     SETTINGS_PACKAGE_MANAGER = "settings.package_manager"
     SETTINGS_PACKAGE_MANAGER_HINT = "settings.package_manager_hint"
     SETTINGS_PACKAGE_MANAGER_AUTO = "settings.package_manager_auto"
+    SETTINGS_MANAGER_STATUS_INSTALLED = "settings.manager_status_installed"
+    SETTINGS_MANAGER_STATUS_MISSING = "settings.manager_status_missing"
+    SETTINGS_MANAGER_NOT_INSTALLABLE = "settings.manager_not_installable"
+    SETTINGS_MANAGER_INSTALL_QUESTION = "settings.manager_install_question"
+    SETTINGS_MANAGER_REMOVE = "settings.manager_remove"
+    LOG_INSTALLING_MANAGER = "log.installing_manager"
+    LOG_REMOVING_MANAGER = "log.removing_manager"
     SETTINGS_SAVE = "settings.save"
     SETTINGS_CANCEL = "settings.cancel"
 
@@ -323,13 +330,17 @@ class TranslationKey(str, Enum):
     CONFIRM_ELEVATION_NOTE = "confirm.elevation.note"
     CONFIRM_ELEVATION_BUTTON = "confirm.elevation.button"
     ELEVATION_UNAVAILABLE = "elevation.unavailable"
-    ELEVATION_NO_OUTPUT = "elevation.no_output"
     CONFIRM_FALLBACK_TITLE = "confirm.fallback.title"
     CONFIRM_FALLBACK_REASON = "confirm.fallback.reason"
+    CONFIRM_FALLBACK_SCOPE_PROJECT = "confirm.fallback.scope_project"
+    CONFIRM_FALLBACK_SCOPE_CONDA = "confirm.fallback.scope_conda"
+    CONFIRM_FALLBACK_SCOPE_ENV = "confirm.fallback.scope_env"
     CONFIRM_FALLBACK_BUTTON = "confirm.fallback.button"
     CONFIRM_BOOTSTRAP_TITLE = "confirm.bootstrap.title"
     CONFIRM_BOOTSTRAP_REASON = "confirm.bootstrap.reason"
     CONFIRM_BOOTSTRAP_BUTTON = "confirm.bootstrap.button"
+    CONFIRM_MANAGER_INSTALL_REASON = "confirm.manager_install_reason"
+    CONFIRM_MANAGER_INSTALL_BUTTON = "confirm.manager_install_button"
 
     BLOCKED_TITLE = "blocked.title"
     BLOCKED_SUGGESTION = "blocked.suggestion"
@@ -337,6 +348,14 @@ class TranslationKey(str, Enum):
     ENV_CURRENT = "env.current"
     ENV_BACKEND = "env.backend"
     ENV_BACKEND_FALLBACK = "env.backend_fallback"
+    ENV_ADD_FOLDER = "env.add_folder"
+    ENV_ADD_FOLDER_TITLE = "env.add_folder_title"
+    ENV_FORGET = "env.forget"
+    ENV_REGISTERED_ADDED = "env.registered_added"
+    ENV_REGISTERED_REMOVED = "env.registered_removed"
+    ENV_REGISTERED_ALREADY = "env.registered_already"
+    ENV_NOT_ENVIRONMENT = "env.not_environment"
+    ENV_REGISTERED_HINT = "env.registered_hint"
 
     PACKAGES_INSTALL = "packages.install"
     PACKAGES_UNINSTALL = "packages.uninstall"
@@ -379,6 +398,8 @@ class TranslationKey(str, Enum):
     LOG_RUNNING = "log.running"
     LOG_DONE = "log.done"
     LOG_FAILED = "log.failed"
+    LOG_FAILED_SILENT = "log.failed_silent"
+    LOG_FAILED_ELEVATED = "log.failed_elevated"
     LOG_CANCELLED = "log.cancelled"
     LOG_EMPTY = "log.empty"
     LOG_HIDE = "log.hide"
@@ -662,9 +683,31 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_PACKAGE_MANAGER: "Package manager",
     TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT: (
         "The program used to install, remove and upgrade packages. Automatic "
-        "picks uv when it is installed and falls back to pip when it is not."
+        "picks the right one for the selected environment: uv or pip for a "
+        "virtual environment, mamba or conda for a conda environment, and the "
+        "tool that owns the files (poetry, pipenv, pdm) for a project folder. "
+        "Forcing a name uses that manager wherever it can manage the "
+        "environment; where it cannot (poetry outside a project folder, conda "
+        "outside a conda environment), the action says so and offers pip "
+        "instead."
     ),
     TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO: "Automatic (uv first, then pip)",
+    TranslationKey.SETTINGS_MANAGER_STATUS_INSTALLED: "%(backend)s is installed.",
+    TranslationKey.SETTINGS_MANAGER_STATUS_MISSING: (
+        "%(backend)s is not installed. The next change through it will offer "
+        "to install it first."
+    ),
+    TranslationKey.SETTINGS_MANAGER_NOT_INSTALLABLE: (
+        "%(backend)s is not installed, and this application cannot install "
+        "it: it is not a pip package. Install it from its own distribution "
+        "(docs.conda.io for conda, mamba.readthedocs.io for mamba)."
+    ),
+    TranslationKey.SETTINGS_MANAGER_INSTALL_QUESTION: (
+        "%(backend)s is not installed on this machine. Install it now?"
+    ),
+    TranslationKey.SETTINGS_MANAGER_REMOVE: "Remove %(backend)s",
+    TranslationKey.LOG_INSTALLING_MANAGER: "Installing %(backend)s — watch the log for its output.",
+    TranslationKey.LOG_REMOVING_MANAGER: "Removing %(backend)s — watch the log for its output.",
     TranslationKey.SETTINGS_SAVE: "Save",
     TranslationKey.SETTINGS_CANCEL: "Cancel",
     TranslationKey.CREATE_ENV_TITLE: "Create a virtual environment",
@@ -796,26 +839,47 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.ELEVATION_UNAVAILABLE: (
         "This system cannot run %(backend)s elevated. Use pip instead, or a virtual environment."
     ),
-    TranslationKey.ELEVATION_NO_OUTPUT: (
-        "Elevated commands cannot stream their output; the log will show the "
-        "result when the command finishes."
-    ),
     TranslationKey.CONFIRM_FALLBACK_TITLE: "A different package manager is needed for this action",
     TranslationKey.CONFIRM_FALLBACK_REASON: (
         "%(backend)s cannot change %(packages)s: the copy Python imports is "
         "in your user site, where %(backend)s never writes. The same action "
         "through pip upgrades that copy, without administrator privileges."
     ),
+    TranslationKey.CONFIRM_FALLBACK_SCOPE_PROJECT: (
+        "%(backend)s cannot manage this environment: it manages project "
+        "folders - a pyproject.toml with its own markers - and this is a "
+        "plain Python environment. Installing or reinstalling %(backend)s "
+        "cannot change that. To use %(backend)s, register the project folder "
+        "on the Environments page and open it there. This action can still "
+        "run through pip, whose exact command is shown below."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_SCOPE_CONDA: (
+        "%(backend)s cannot manage this environment: it manages conda "
+        "environments (a conda-meta directory), and this is not one. This "
+        "action can still run through pip, whose exact command is shown below."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_SCOPE_ENV: (
+        "uv installs into Python environments, and this location is not "
+        "one: a project folder has its own tool, and uv would not know "
+        "which environment to change. This action can still run through "
+        "pip, whose exact command is shown below."
+    ),
     TranslationKey.CONFIRM_FALLBACK_BUTTON: "Run with pip",
     TranslationKey.CONFIRM_BOOTSTRAP_TITLE: "%(backend)s is not installed",
     TranslationKey.CONFIRM_BOOTSTRAP_REASON: (
         "%(backend)s is not available on this machine. The commands above "
-        "install it into this environment first - pip through Python's "
-        "bundled ensurepip, uv as a package from the index - and the last "
-        "command is the one this action was about, run through %(backend)s "
-        "as you chose."
+        "install it first - pip through Python's bundled ensurepip when it "
+        "is missing too, %(backend)s itself as a package from the index - "
+        "and the last command is the one this action was about, run "
+        "through %(backend)s as you chose."
     ),
     TranslationKey.CONFIRM_BOOTSTRAP_BUTTON: "Install %(backend)s and continue",
+    TranslationKey.CONFIRM_MANAGER_INSTALL_REASON: (
+        "%(backend)s is not available on this machine. The command installs "
+        "it as a package from the index - pip itself is ensured first when "
+        "it is missing too - and nothing else runs."
+    ),
+    TranslationKey.CONFIRM_MANAGER_INSTALL_BUTTON: "Install %(backend)s",
     TranslationKey.BLOCKED_TITLE: "This environment cannot be modified",
     TranslationKey.BLOCKED_SUGGESTION: "Suggestion",
     TranslationKey.ENV_NO_MANAGER: (
@@ -824,6 +888,23 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.ENV_CURRENT: "(current interpreter)",
     TranslationKey.ENV_BACKEND: "Backend",
     TranslationKey.ENV_BACKEND_FALLBACK: "Default backend",
+    TranslationKey.ENV_ADD_FOLDER: "Add a folder\u2026",
+    TranslationKey.ENV_ADD_FOLDER_TITLE: (
+        "Choose a virtual environment, a conda environment, or a "
+        "poetry / pipenv / pdm project folder"
+    ),
+    TranslationKey.ENV_FORGET: "Forget",
+    TranslationKey.ENV_REGISTERED_ADDED: "Added %(path)s to the environment list.",
+    TranslationKey.ENV_REGISTERED_REMOVED: "Removed %(path)s from the environment list.",
+    TranslationKey.ENV_REGISTERED_ALREADY: "%(path)s is already in the list.",
+    TranslationKey.ENV_NOT_ENVIRONMENT: (
+        "That folder is neither a Python environment nor a poetry, pipenv or "
+        "pdm project, so there is nothing here to manage."
+    ),
+    TranslationKey.ENV_REGISTERED_HINT: (
+        "A registered folder is remembered, never deleted: forgetting it "
+        "only removes it from this list."
+    ),
     TranslationKey.PACKAGES_INSTALL: "Install",
     TranslationKey.PACKAGES_UNINSTALL: "Uninstall",
     TranslationKey.PACKAGES_UPGRADE: "Upgrade",
@@ -861,6 +942,11 @@ EN_TABLE: dict[str, str] = {
     TranslationKey.LOG_RUNNING: "Running...",
     TranslationKey.LOG_DONE: "Finished successfully.",
     TranslationKey.LOG_FAILED: "Failed: %(error)s",
+    TranslationKey.LOG_FAILED_SILENT: ("The command failed without producing any output."),
+    TranslationKey.LOG_FAILED_ELEVATED: (
+        "The command failed. It ran with the OS's help and its output could "
+        "not be captured, so the reason is not recorded here."
+    ),
     TranslationKey.LOG_CANCELLED: "Cancelled.",
     TranslationKey.LOG_EMPTY: "Nothing has run yet.",
     TranslationKey.LOG_HIDE: "Hide",
@@ -1141,10 +1227,34 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.SETTINGS_CONFIRM_UPGRADE: "تأیید قبل از ارتقا",
     TranslationKey.SETTINGS_PACKAGE_MANAGER: "مدیر بسته",
     TranslationKey.SETTINGS_PACKAGE_MANAGER_HINT: (
-        "برنامه‌ای که برای نصب، حذف و ارتقای بسته‌ها استفاده می‌شود. گزینهٔ "
-        "خودکار اگر uv نصب باشد آن را برمی‌گزیند و در غیر این صورت از pip استفاده می‌کند."
+        "برنامه‌ای که برای نصب، حذف و ارتقای بسته‌ها استفاده می‌شود. گزینهٔ خودکار "
+        "مناسب‌ترین را برای محیط انتخاب‌شده برمی‌گزیند: uv یا pip برای محیط مجازی، "
+        "mamba یا conda برای محیط کوندا، و ابزار مالک پرونده‌ها (poetry، pipenv یا "
+        "pdm) برای پوشهٔ پروژه. انتخاب صریح یک نام، آن مدیر را هرجا واقعاً بتواند "
+        "محیط را مدیریت کند به کار می‌برد؛ و هرجا نتواند (مثل poetry بیرون پوشهٔ "
+        "پروژه یا conda بیرون محیط کوندا)، خودِ کار می‌گوید چرا و به‌جایش pip را "
+        "پیشنهاد می‌کند."
     ),
     TranslationKey.SETTINGS_PACKAGE_MANAGER_AUTO: "خودکار (ابتدا uv، سپس pip)",
+    TranslationKey.SETTINGS_MANAGER_STATUS_INSTALLED: "\u200f%(backend)s نصب است.",
+    TranslationKey.SETTINGS_MANAGER_STATUS_MISSING: (
+        "\u200f%(backend)s نصب نیست. تغییر بعدی از طریق آن، ابتدا پیشنهاد " "نصبش را می‌دهد."
+    ),
+    TranslationKey.SETTINGS_MANAGER_NOT_INSTALLABLE: (
+        "\u200f%(backend)s نصب نیست و این برنامه نمی‌تواند آن را نصب کند: "
+        "بستهٔ pip نیست. آن را از توزیع خودش نصب کنید "
+        "(برای conda از docs.conda.io و برای mamba از mamba.readthedocs.io)."
+    ),
+    TranslationKey.SETTINGS_MANAGER_INSTALL_QUESTION: (
+        "\u200f%(backend)s روی این دستگاه نصب نیست. هم‌اکنون نصب شود؟"
+    ),
+    TranslationKey.SETTINGS_MANAGER_REMOVE: "حذف \u200f%(backend)s",
+    TranslationKey.LOG_INSTALLING_MANAGER: (
+        "در حال نصب \u200f%(backend)s — خروجی‌اش را در گزارش دنبال کنید."
+    ),
+    TranslationKey.LOG_REMOVING_MANAGER: (
+        "در حال حذف \u200f%(backend)s — خروجی‌اش را در گزارش دنبال کنید."
+    ),
     TranslationKey.SETTINGS_SAVE: "ذخیره",
     TranslationKey.SETTINGS_CANCEL: "لغو",
     TranslationKey.CREATE_ENV_TITLE: "ساخت محیط مجازی",
@@ -1270,25 +1380,48 @@ FA_TABLE: dict[str, str] = {
         "این سیستم نمی‌تواند %(backend)s را با دسترسی مدیر اجرا کند. "
         "به‌جای آن از pip یا محیط مجازی استفاده کنید."
     ),
-    TranslationKey.ELEVATION_NO_OUTPUT: (
-        "خروجی فرمان‌های اجراشده با دسترسی مدیر به‌صورت زنده نمایش داده "
-        "نمی‌شود؛ نتیجه پس از پایان فرمان در گزارش می‌آید."
-    ),
     TranslationKey.CONFIRM_FALLBACK_TITLE: "برای این کار به مدیر بستهٔ دیگری نیاز است",
     TranslationKey.CONFIRM_FALLBACK_REASON: (
         "\u200f%(backend)s نمی‌تواند %(packages)s را تغییر دهد: نسخه‌ای که "
         "پایتون آن را بار می‌کند در site کاربر شماست و %(backend)s هرگز آنجا "
         "نمی‌نویسد. همین کار با pip همان نسخه را ارتقا می‌دهد، بدون دسترسی مدیر."
     ),
+    TranslationKey.CONFIRM_FALLBACK_SCOPE_PROJECT: (
+        "\u200f%(backend)s نمی‌تواند این محیط را مدیریت کند: این ابزار مدیرِ "
+        "پوشه‌های پروژه است — pyproject.toml با نشانگرهای خودش — و این یک محیطِ "
+        "پایتونِ معمولی است. نصب یا نصبِ دوبارهٔ \u200f%(backend)s چیزی را عوض "
+        "نمی‌کند. برای استفاده از \u200f%(backend)s پوشهٔ پروژه را در صفحهٔ "
+        "«محیط‌ها» ثبت کنید و از آنجا بازش کنید. این کار همچنان می‌تواند با "
+        "pip اجرا شود؛ دستور دقیقش پایین آمده است."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_SCOPE_CONDA: (
+        "\u200f%(backend)s نمی‌تواند این محیط را مدیریت کند: مدیرِ محیط‌های "
+        "conda است (دایرکتوری conda-meta) و این یکی از آن نیست. این کار همچنان "
+        "می‌تواند با pip اجرا شود؛ دستور دقیقش پایین آمده است."
+    ),
+    TranslationKey.CONFIRM_FALLBACK_SCOPE_ENV: (
+        "uv در محیط‌های پایتون نصب می‌کند و این مکان، محیط پایتون نیست: "
+        "پوشهٔ پروژه ابزار خودش را دارد و uv نمی‌داند کدام محیط را تغییر "
+        "بدهد. این کار همچنان می‌تواند با pip اجرا شود؛ دستور دقیقش پایین "
+        "آمده است."
+    ),
     TranslationKey.CONFIRM_FALLBACK_BUTTON: "اجرای با pip",
     TranslationKey.CONFIRM_BOOTSTRAP_TITLE: "\u200f%(backend)s نصب نیست",
     TranslationKey.CONFIRM_BOOTSTRAP_REASON: (
         "\u200f%(backend)s روی این دستگاه در دسترس نیست. دستورهای بالا ابتدا "
-        "آن را در همین محیط نصب می‌کنند — \u200fpip از طریق ensurepip خودِ "
-        "پایتون، و uv به‌عنوان یک بسته از مخزن — و آخرین دستور همان کاری است "
-        "که درخواست کردید، اجراشده از طریق \u200f%(backend)s به انتخاب شما."
+        "آن را نصب می‌کنند — \u200fpip از طریق ensurepip خودِ پایتون وقتی آن "
+        "هم غایب باشد، و خودِ \u200f%(backend)s به‌عنوان یک بسته از مخزن — و "
+        "آخرین دستور همان کاری است که درخواست کردید، اجراشده از طریق "
+        "\u200f%(backend)s به انتخاب شما."
     ),
     TranslationKey.CONFIRM_BOOTSTRAP_BUTTON: "نصب \u200f%(backend)s و ادامه",
+    TranslationKey.CONFIRM_MANAGER_INSTALL_REASON: (
+        "\u200f%(backend)s روی این دستگاه در دسترس نیست. این فرمان آن را "
+        "به‌عنوان یک بسته از مخزن نصب می‌کند — اگر خودِ pip هم غایب "
+        "باشد، ابتدا با ensurepip خودِ پایتون فراهم می‌شود — و هیچ کار "
+        "دیگری اجرا نمی‌شود."
+    ),
+    TranslationKey.CONFIRM_MANAGER_INSTALL_BUTTON: "نصب \u200f%(backend)s",
     TranslationKey.BLOCKED_TITLE: "این محیط قابل تغییر نیست",
     TranslationKey.BLOCKED_SUGGESTION: "پیشنهاد",
     TranslationKey.ENV_NO_MANAGER: (
@@ -1297,6 +1430,22 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.ENV_CURRENT: "(مفسر فعلی)",
     TranslationKey.ENV_BACKEND: "موتور",
     TranslationKey.ENV_BACKEND_FALLBACK: "موتور پیش‌فرض",
+    TranslationKey.ENV_ADD_FOLDER: "افزودن پوشه\u2026",
+    TranslationKey.ENV_ADD_FOLDER_TITLE: (
+        "یک محیط مجازی، محیط کوندا یا پوشهٔ پروژهٔ poetry / pipenv / pdm را انتخاب کنید"
+    ),
+    TranslationKey.ENV_FORGET: "فراموش کردن",
+    TranslationKey.ENV_REGISTERED_ADDED: "\u200f%(path)s به فهرست محیط\u200cها افزوده شد.",
+    TranslationKey.ENV_REGISTERED_REMOVED: "\u200f%(path)s از فهرست محیط\u200cها حذف شد.",
+    TranslationKey.ENV_REGISTERED_ALREADY: "\u200f%(path)s از قبل در فهرست است.",
+    TranslationKey.ENV_NOT_ENVIRONMENT: (
+        "آن پوشه نه محیط پایتون است و نه پروژهٔ poetry یا pipenv یا pdm؛ پس چیزی "
+        "برای مدیریت آن اینجا نیست."
+    ),
+    TranslationKey.ENV_REGISTERED_HINT: (
+        "پوشهٔ ثبت‌شده به‌خاطر سپرده می‌شود، هرگز حذف نمی‌شود؛ فراموشی فقط آن را از "
+        "این فهرست برمی‌دارد."
+    ),
     TranslationKey.PACKAGES_INSTALL: "نصب",
     TranslationKey.PACKAGES_UNINSTALL: "حذف",
     TranslationKey.PACKAGES_UPGRADE: "ارتقا",
@@ -1334,6 +1483,11 @@ FA_TABLE: dict[str, str] = {
     TranslationKey.LOG_RUNNING: "در حال اجرا...",
     TranslationKey.LOG_DONE: "با موفقیت تمام شد.",
     TranslationKey.LOG_FAILED: "ناموفق: %(error)s",
+    TranslationKey.LOG_FAILED_SILENT: "فرمان بدون تولید هیچ خروجی شکست خورد.",
+    TranslationKey.LOG_FAILED_ELEVATED: (
+        "فرمان شکست خورد. با کمک سیستم‌عامل اجرا شد و خروجی‌اش قابل دریافت "
+        "نبود، پس دلیلش اینجا ثبت نشد."
+    ),
     TranslationKey.LOG_CANCELLED: "لغو شد.",
     TranslationKey.LOG_EMPTY: "هنوز چیزی اجرا نشده.",
     TranslationKey.LOG_HIDE: "پنهان‌کردن",

@@ -9,10 +9,22 @@ cache is bounded and does not store failures, and the version list is capped.
 
 from __future__ import annotations
 
+from pypackhub.core.inventory import KNOWN_BACKENDS
 from pypackhub.core.pypi import PyPICache, PyPIClient, _json_base_for
 from pypackhub.core.settings import AppSettings, validate_settings
 
 # -- settings validation ---------------------------------------------------------
+
+
+def test_every_manager_the_factory_knows_can_be_forced() -> None:
+    """The settings page and the backend factory share one set of names: a
+    persisted choice the factory could not build would be a setting that
+    lies, and a factory name the settings refuse would be a backend nobody
+    can force. The two lists move together or not at all."""
+    for name in ("auto", *KNOWN_BACKENDS):
+        assert validate_settings(AppSettings(package_manager=name)).package_manager == name
+
+    assert validate_settings(AppSettings(package_manager="rye")).package_manager == "auto"
 
 
 def test_trusted_hosts_are_shape_checked_and_lowercased() -> None:

@@ -25,7 +25,7 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from packaging.requirements import InvalidRequirement, Requirement
 from PySide6.QtCore import Qt, Signal
@@ -95,6 +95,21 @@ from pypackhub.ui.worker_signals import emit_if_alive
 __all__ = ["PackagesView", "RefreshOutcome"]
 
 
+#: Why a forced manager cannot manage an environment, in one word the
+#: confirmation dialog turns into the matching sentence: the project tools
+#: manage project folders, conda and mamba manage conda environments, and
+#: uv manages Python environments. A name that is not here cannot be
+#: scope-refused for a known reason, so it never reaches the scope dialog.
+_SCOPE_REASONS: Final[dict[str, str]] = {
+    "poetry": "project",
+    "pipenv": "project",
+    "pdm": "project",
+    "conda": "conda",
+    "mamba": "conda",
+    "uv": "environment",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class RefreshOutcome:
     """What a refresh produced, handed back from the worker thread."""
@@ -117,6 +132,19 @@ class PackagesView(QWidget):
     listed = Signal(object)
     refresh_finished = Signal(object)
     run_finished = Signal(object)
+    #: Emitted once per run, the moment a confirmed plan starts. The window
+    #: reveals the log panel for it: a run whose log is hidden is a change
+    #: the user cannot watch happen, and the log is where the answer to
+    #: "what is it doing?" lives.
+    run_started = Signal()
+    #: The manager row's run state, for the settings page that started it:
+    #: when the batch begins (with whether its bar can count percentages),
+    #: every percentage the run's real output reports, and the outcome when
+    #: the batch ends - a red bar is the settings page's word for a failed
+    #: one, and only the run itself can say which it was.
+    manager_run_started = Signal(bool)
+    manager_progress = Signal(int)
+    manager_run_finished = Signal(object)
     create_finished = Signal(object)
     run_line = Signal(str)
     status_changed = Signal(str)
@@ -143,10 +171,27 @@ class PackagesView(QWidget):
         self._refresh_task: str = ""
         self._refresh_pending = False
         self._run_task: str = ""
+        #: Whether the in-flight run is elevated. One run is in flight at a
+        #: time (``_run_task`` refuses a second), and both ends of it live on
+        #: the GUI thread, so a plain flag answers the question the finish
+        #: handler needs: a failure that captured nothing *and* ran elevated
+        #: has a reason for its silence, and the log says that instead of
+        #: "Failed:" with nothing after it.
+        self._run_elevated = False
         self._create_task: str = ""
         #: Confirmed plans waiting for the running one to finish (a rollback
         #: or an undo can be two commands the user approved as one decision).
         self._plan_queue: list[tuple[CommandPlan, bool]] = []
+        #: Whether the run in flight belongs to the settings page's manager
+        #: row - the install or remove it asked for. While it is true the
+        #: run's percentages and its outcome are forwarded to that row's own
+        #: progress bar, so the page the action started from is the page
+        #: that watches it. It clears when the batch's queue drains.
+        self._manager_run_active = False
+        #: Whether the manager run's bar can count (an install's download
+        #: and install percentages) or can only animate (a removal's
+        #: uninstall prints nothing countable).
+        self._manager_determinate = True
         #: The snapshot store behind the automatic snapshots and the undo.
         self._snapshots = snapshots if snapshots is not None else SnapshotStore()
 
@@ -391,8 +436,30 @@ class PackagesView(QWidget):
         self._index = None
         self.model.set_inventory(None)
         self.detail.clear()
+        self._update_sizes_available()
         self._context.set_default_environment(resolved)
         self.refresh()
+
+    def _sizes_available(self) -> bool:
+        """Whether the active backend's rows can be sized honestly.
+
+        The size column measures the selected environment's distributions,
+        which is the truth for pip, uv and conda rows (a package without a
+        RECORD reads "unknown" - also the truth). A backend whose rows are
+        something else entirely - pipx applications, which live in their own
+        venvs - could put another environment's number on a row, so its
+        switch is hidden rather than offering numbers that might not belong.
+        """
+        try:
+            return self.service.backend.capability.can_show_sizes
+        except (BackendError, OSError):
+            # No manager for this environment yet: keep the switch - the
+            # bootstrap flow may make one usable, and a listing that never
+            # arrives sizes nothing anyway.
+            return True
+
+    def _update_sizes_available(self) -> None:
+        self.sizes_check.setVisible(self._sizes_available())
 
     def selected_rows(self) -> tuple[PackageRow, ...]:
         """The distinct selected rows, in table order."""
@@ -423,7 +490,10 @@ class PackagesView(QWidget):
             self._refresh_pending = True
             return
 
-        with_sizes = self.sizes_check.isChecked()
+        # The sizes pass runs only when the rows can be sized honestly: a
+        # hidden switch (see ``_sizes_available``) must not still start the
+        # pass through the saved default.
+        with_sizes = self.sizes_check.isChecked() and self._sizes_available()
         self.status_changed.emit(self._shell.text(TranslationKey.PACKAGES_REFRESHING))
 
         # Captured before the work starts: the pass belongs to the
@@ -921,6 +991,14 @@ class PackagesView(QWidget):
         # shown as commands and confirmed as one decision.
         missing = service.required_backend_missing()
         if missing:
+            # A forced manager that could never manage this environment is
+            # not "missing": poetry on a plain interpreter is out of its
+            # scope whether it is installed or not, and offering to install
+            # it first would promise an upgrade through it that cannot
+            # happen. The substitution through pip is offered instead, with
+            # the reason that is actually true.
+            if missing != "pip" and not service.manager_applies_to_environment(missing):
+                return self._confirm_fallback_for_scope(action, policy, missing)
             return self._confirm_bootstrap_and_run(action, policy, missing)
 
         try:
@@ -1032,9 +1110,11 @@ class PackagesView(QWidget):
 
         needs_elevation = self.service.bootstrap_needs_elevation()
         if needs_elevation and not elevation_supported():
-            message = self._shell.text(
-                TranslationKey.ELEVATION_UNAVAILABLE, backend=self.service.backend_name
-            )
+            # ``missing`` is the name the message shows, not the resolved
+            # backend's: in this flow the manager does not exist yet, and
+            # resolving one would raise exactly when the offer is about to
+            # be made.
+            message = self._shell.text(TranslationKey.ELEVATION_UNAVAILABLE, backend=missing)
             self.status_changed.emit(message)
             self.toast.emit(message, ToastKind.INFO)
             return False
@@ -1067,12 +1147,150 @@ class PackagesView(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
             return False
 
+        # The same word the settings route says, for the same reason: the
+        # batch's first half installs a manager, and the toast is the
+        # immediate answer to "did it start?" from whichever door the
+        # install came - this offer, or the settings page's question.
+        self.toast.emit(
+            self._shell.text(TranslationKey.LOG_INSTALLING_MANAGER, backend=missing),
+            ToastKind.INFO,
+        )
         # The batch installs a manager: whatever the service probed about the
         # managers is now stale, and the next action must re-probe rather
         # than trust a cached "missing".
         self.service.invalidate_backend_state()
-        self.run_confirmed_plans([(step, needs_elevation) for step in (*bootstrap, original)])
+        # The install steps write the environment, so the blanket elevation
+        # answer is theirs. The action's own step is judged by the backend it
+        # will run through: a pipx upgrade writes pipx's home, not the locked
+        # environment its installation needed help with, and running it
+        # elevated would throw away its streamed output - the output the user
+        # needs exactly when something goes wrong.
+        action_elevated = self.service.elevation_assuming_backend(missing, action)
+        self.run_confirmed_plans(
+            [(step, needs_elevation) for step in bootstrap] + [(original, action_elevated)]
+        )
         return True
+
+    def install_manager(self, name: str) -> None:
+        """Install a missing manager the user asked for, from the settings page.
+
+        The page asked whether to install it; the answer runs through the
+        same path every change runs through - the exact commands in one
+        confirmation, the live log, the history row, the snapshot before it -
+        so an install started in Settings is recorded exactly like the one
+        the bootstrap flow offers at action time, and the service's cached
+        "missing" is invalidated after the batch so the next action re-probes
+        instead of trusting it.
+        """
+        try:
+            action = self.service.action_for_manager_install(name)
+            plans = self.service.bootstrap_plans(name, action=action)
+        except (BackendError, ValidationError) as error:
+            message = str(error)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return
+
+        if not plans:
+            # Unreachable through the settings page - the offer is guarded
+            # by what the bootstrap can install - but a silent exit here
+            # would be the same dead-end twice over, so say what happened.
+            message = self._shell.text(
+                TranslationKey.SETTINGS_MANAGER_NOT_INSTALLABLE, backend=name
+            )
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.WARNING)
+            return
+
+        needs_elevation = self.service.bootstrap_needs_elevation()
+        if needs_elevation and not elevation_supported():
+            message = self._shell.text(TranslationKey.ELEVATION_UNAVAILABLE, backend=name)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.INFO)
+            return
+
+        # The last plan is the installing command the dialog is built
+        # around; anything before it (ensurepip, when even pip is missing)
+        # rides in the bootstrap notice like every setup step does.
+        setup, main = plans[:-1], plans[-1]
+        dialog = ConfirmationDialog(
+            plan=main,
+            policy=self.service.policy(),
+            translator=self._shell.translator,
+            elevation=(ElevationNotice(backend=name) if needs_elevation else None),
+            bootstrap=BootstrapNotice(
+                backend=name,
+                commands=tuple(step.display_command() for step in setup),
+                install_only=True,
+            ),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
+            return
+
+        # The run is about to happen where it can be watched - the window
+        # switches to this page and reveals the log - and the toast is the
+        # immediate answer to "did it start?", before any output exists.
+        self.toast.emit(
+            self._shell.text(TranslationKey.LOG_INSTALLING_MANAGER, backend=name),
+            ToastKind.INFO,
+        )
+        self.service.invalidate_backend_state()
+        # The settings page's manager row watches this batch through its own
+        # bar; an install's own output counts (downloads, installs), so its
+        # bar counts too.
+        self._manager_run_active = True
+        self._manager_determinate = True
+        self.run_confirmed_plans([(step, needs_elevation) for step in plans])
+
+    def remove_manager(self, name: str) -> None:
+        """Remove an installed manager, from the settings page.
+
+        The mirror of :meth:`install_manager`: the same confirm-and-run
+        path, the same log and history, one command - pip uninstalling what
+        pip installed - and the service's cached facts invalidated after, so
+        the next probe reports the manager honestly.
+        """
+        try:
+            action = self.service.action_for_manager_removal(name)
+            plan = self.service.manager_removal_plan(name, action)
+        except (BackendError, ValidationError) as error:
+            message = str(error)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return
+
+        # Removing files from the environment's site-packages needs the
+        # same writability the install batch checked: the same probe, the
+        # same refusal when the OS cannot provide the help.
+        needs_elevation = self.service.bootstrap_needs_elevation()
+        if needs_elevation and not elevation_supported():
+            message = self._shell.text(TranslationKey.ELEVATION_UNAVAILABLE, backend=name)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.INFO)
+            return
+
+        dialog = ConfirmationDialog(
+            plan=plan,
+            policy=self.service.policy(),
+            translator=self._shell.translator,
+            elevation=(ElevationNotice(backend=name) if needs_elevation else None),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
+            return
+
+        self.toast.emit(
+            self._shell.text(TranslationKey.LOG_REMOVING_MANAGER, backend=name),
+            ToastKind.INFO,
+        )
+        self.service.invalidate_backend_state()
+        # The mirror of the install route, with the one honest difference:
+        # an uninstall prints nothing countable, so the row's bar can only
+        # animate - busy is the truthful shape for it.
+        self._manager_run_active = True
+        self._manager_determinate = False
+        self.run_confirmed_plans([(plan, needs_elevation)])
 
     def _confirm_fallback_with_pip(self, action: PackageAction, policy: ModificationPolicy) -> bool:
         """Offer the same action through pip, the backend that can actually run it.
@@ -1107,6 +1325,51 @@ class PackagesView(QWidget):
             policy=policy,
             translator=self._shell.translator,
             fallback=FallbackNotice(replaced=self.service.backend_name),
+            typosquat=self._typosquat_notice_for(action),
+            conflicts=self._conflict_notice_for(action),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.confirmed:
+            return False
+
+        self._run_plan(plan, meta=self._record_action_context(plan))
+        return True
+
+    def _confirm_fallback_for_scope(
+        self, action: PackageAction, policy: ModificationPolicy, replaced: str
+    ) -> bool:
+        """Offer the same action through pip when the forced manager cannot
+        manage this environment at all.
+
+        The user set poetry in the settings and picked a package in a plain
+        interpreter: poetry manages project folders, so no amount of
+        installing it - it already is installed - makes this upgrade
+        poetry's. The confirmation says the scope truth instead of the
+        missing-manager offer, and pip, which does change this environment,
+        carries the action with its own exact command. ``--user`` rides
+        along exactly when the imported copy lives in the user site - the
+        same reachability rule as every other pip plan.
+        """
+        if action.kind is not ActionKind.UNINSTALL and self.service.action_targets_user_site(
+            action
+        ):
+            action = replace(action, user=True)
+
+        try:
+            plan = self.service.plan_with_backend("pip", action)
+        except BackendError as error:
+            message = str(error)
+            self.status_changed.emit(message)
+            self.toast.emit(message, ToastKind.ERROR)
+            return False
+
+        dialog = ConfirmationDialog(
+            plan=plan,
+            policy=policy,
+            translator=self._shell.translator,
+            fallback=FallbackNotice(
+                replaced=replaced, scope=_SCOPE_REASONS.get(replaced, "project")
+            ),
             typosquat=self._typosquat_notice_for(action),
             conflicts=self._conflict_notice_for(action),
             parent=self,
@@ -1171,21 +1434,27 @@ class PackagesView(QWidget):
         self._run_progress.setVisible(True)
 
     def _on_run_line(self, text: str) -> None:
-        """Show one output line in the log, and let it move the bar.
+        """Show one output line in the log, and let it move the bars.
 
         pip and uv report work as it happens - a line per package resolved,
         per file fetched, the switch to the install phase, success - and the
         tracker turns those real events into overall progress. The bar fills
         with what the manager actually did, moves only when a line justifies
         it, and never runs backward; a line that reports nothing leaves it
-        exactly where it was.
+        exactly where it was. A run the settings page started moves the
+        same percentage to that page's own bar, so the row the install was
+        asked from is the row that shows it happening.
         """
         self._log.append_line(text)
-        if self._run_progress.isHidden():
+        if self._run_progress.isHidden() and not self._manager_run_active:
             return
         percent = self._run_progress_tracker.observe(text)
-        if percent is not None:
+        if percent is None:
+            return
+        if not self._run_progress.isHidden():
             self._run_progress.setValue(percent)
+        if self._manager_run_active:
+            self.manager_progress.emit(percent)
 
     def _hide_run_progress(self) -> None:
         self._run_progress.setVisible(False)
@@ -1216,9 +1485,18 @@ class PackagesView(QWidget):
 
         self._log.begin_run(plan.label)
         self._log.append_line(f"$ {plan.display_command()}")
-        if elevated:
-            self._log.append_line(self._shell.text(TranslationKey.ELEVATION_NO_OUTPUT))
+        # Every run counts what its manager reports - downloads, installs -
+        # including an elevated one: its output arrives through the log file
+        # the elevated helper writes and the runner follows, so the
+        # percentages are the run's own, not a guess.
         self._show_run_progress(plan.label)
+        self._run_elevated = elevated
+        self.run_started.emit()
+        if self._manager_run_active:
+            # The settings page's manager row watches this run through its
+            # own small bar; each step restarts it at zero, because each
+            # step is a command of its own with its own work to report.
+            self.manager_run_started.emit(self._manager_determinate)
 
         def work(_task_id: str, _progress: object, cancel: threading.Event) -> CommandResult:
             service = self._context.service_for(self._environment)
@@ -1406,6 +1684,8 @@ class PackagesView(QWidget):
 
     def _on_run_finished(self, result: TaskResult) -> None:
         self._run_task = ""
+        elevated = self._run_elevated
+        self._run_elevated = False
         # The next queued plan - if there is one - re-shows the bar with its
         # own label in the same event-loop turn, so there is no flicker.
         self._hide_run_progress()
@@ -1413,6 +1693,15 @@ class PackagesView(QWidget):
 
         outcome = _outcome_for(result, command_result)
         error = _error_for(result, command_result)
+        if outcome is RunOutcome.FAILED and not error:
+            # "Failed:" with nothing after it reads as the application's own
+            # bug, which is how a lost pipx upgrade was reported. A failure
+            # that captured nothing has a reason for the silence: an
+            # elevated run crosses the OS's consent boundary, which carries
+            # no pipes, and any other silent death gets said so plainly.
+            error = self._shell.text(
+                TranslationKey.LOG_FAILED_ELEVATED if elevated else TranslationKey.LOG_FAILED_SILENT
+            )
 
         self._log.end_run(outcome, error=error)
         if outcome is not RunOutcome.DONE:
@@ -1422,6 +1711,11 @@ class PackagesView(QWidget):
             # plans behind it were approved as one decision, and running the
             # rest anyway would be executing half of what was confirmed.
             self._plan_queue.clear()
+            # The settings row's bar stops with the batch: red for a failure
+            # the row will be asked about, gone for a run the user stopped.
+            if self._manager_run_active:
+                self._manager_run_active = False
+                self.manager_run_finished.emit(outcome)
             # A failed run may still have changed something before it failed;
             # whatever it left behind is what the next pass has to report.
             self._refresh_after_change()
@@ -1438,6 +1732,12 @@ class PackagesView(QWidget):
         self._index = None
         self._refresh_after_change()
         self._start_next_confirmed_plan()
+        if self._manager_run_active and not self._run_task:
+            # The batch's last step finished and nothing is queued behind
+            # it: the settings row's bar is done too, and the row's honest
+            # state may have just changed (pipx may now be installed).
+            self._manager_run_active = False
+            self.manager_run_finished.emit(outcome)
 
     def _refresh_after_change(self) -> None:
         """Reload now that the environment changed, overtaking a stale pass.

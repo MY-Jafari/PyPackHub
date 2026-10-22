@@ -193,7 +193,16 @@ class TaskManager:
                 self._tasks.pop(task_id, None)
 
             if on_finish is not None:
-                on_finish(task_id, result)
+                try:
+                    on_finish(task_id, result)
+                except Exception:
+                    # The result is recorded before this runs, so the UI is
+                    # not waiting on the callback for its answer. A callback
+                    # that raises is a bug in the callback - the view is gone
+                    # and its signal with it, for instance - and it must be
+                    # logged rather than take the worker thread down with an
+                    # unhandled traceback.
+                    _LOGGER.exception("task %s result callback failed", task_id)
 
         thread = threading.Thread(
             target=runner,

@@ -16,8 +16,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QStackedWidget, QWidget
 
+import pypackhub.ui.views.packages as packages_module
 from pypackhub.core.settings import ColorTheme, Language
 from pypackhub.ui.app import build_window, register_bundled_fonts
 from pypackhub.ui.i18n.translations import EN_TABLE, FA_TABLE
@@ -31,6 +32,7 @@ from pypackhub.ui.views.main_window import (
 )
 from pypackhub.ui.views.settings import PACKAGE_MANAGER_CHOICES
 from pypackhub.ui.views.window_shell import QSettingsStore, WindowShell
+from pypackhub.ui.widgets.log_panel import RunOutcome
 
 pytestmark = pytest.mark.gui
 
@@ -51,7 +53,21 @@ def window(qapp, store, monkeypatch) -> MainWindow:
     # The environments page now discovers on a worker thread; these tests
     # are about the window, so the scan is pinned to an empty answer rather
     # than walking the machine's real home directory fifteen times.
-    monkeypatch.setattr("pypackhub.ui.views.environments.detected_environments", lambda roots: None)
+    monkeypatch.setattr(
+        "pypackhub.ui.views.environments.detected_environments", lambda roots, registered=(): None
+    )
+    # The top-bar switcher's discovery goes through the provider, which also
+    # walks the machine's real home on a worker thread - one that can
+    # outlive the window that scheduled it, because the walk takes seconds
+    # on a real disk. Sixteen windows meant sixteen real scans racing their
+    # own teardowns, which is where the suite's intermittent hard crashes
+    # came from. Pinning the provider's scan keeps these tests about the
+    # window, not about the disk they happen to run on; the switcher's own
+    # test pins the context itself and is unaffected.
+    monkeypatch.setattr(
+        "pypackhub.ui.services.detected_environments",
+        lambda roots, registered=(): type("Listing", (), {"environments": ()})(),
+    )
     shell = WindowShell(store=store)
     shell.load()
     built = MainWindow(shell=shell)
@@ -280,3 +296,186 @@ def test_environment_discovery_fills_the_switcher_off_the_gui_thread(
     qtbot.waitUntil(lambda: window._environment_switcher.findData(str(where)) >= 0, timeout=5000)
 
     assert window._environment_switcher.currentData() == str(where)
+
+
+def test_the_settings_install_request_runs_from_the_settings_page(
+    window: MainWindow, monkeypatch
+) -> None:
+    """Picking a missing manager in Settings and answering "install now"
+    must land in the one confirm-and-run path - the same log, history and
+    confirmation every other change goes through - not in a private
+    shortcut around it.
+
+    The user stays on the page they asked from: the manager row owns its
+    own small progress bar now, so the run is watched where it started
+    rather than somewhere it takes a page switch to reach.
+
+    The signal's slot is bound at construction, so this drives the real
+    ``install_manager`` with its service and queue replaced at the seams
+    the method looks up: the batch is recorded, nothing real is installed.
+    """
+    from pypackhub.core.backends.base import CommandPlan
+
+    recorded: list[tuple[tuple[CommandPlan, bool], ...]] = []
+
+    class Accepting:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    service = window._packages._context.service_for(window._packages.environment)
+    monkeypatch.setattr(window._packages, "refresh", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "bootstrap_plans",
+        lambda name, action: [
+            CommandPlan(
+                argv=("python", "-m", "pip", "install", "--upgrade", "--", name),
+                action=action,
+                label=f"install {name}",
+                backend="pip",
+            )
+        ],
+    )
+    monkeypatch.setattr(service, "bootstrap_needs_elevation", lambda: False)
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", Accepting)
+    monkeypatch.setattr(
+        window._packages,
+        "run_confirmed_plans",
+        lambda plans: recorded.append(tuple(plans)),
+    )
+
+    # The user is on the settings page when they pick the manager - that is
+    # where the question was asked and answered.
+    window.show_view(ViewName.SETTINGS)
+    window._settings_view.manager_install_requested.emit("pipx")
+
+    # The user stays on the page they asked from: the row's own bar shows
+    # the run, and the window-wide log opens below whichever page is
+    # showing. The nav says so too - Settings is still the checked page.
+    assert window.current_view is ViewName.SETTINGS
+    assert recorded and len(recorded[0]) == 1
+    assert recorded[0][0][0].label == "install pipx"
+    assert window._nav_buttons[ViewName.SETTINGS].isChecked()
+    assert not window._nav_buttons[ViewName.PACKAGES].isChecked()
+
+
+def test_the_settings_remove_request_runs_from_the_settings_page(
+    window: MainWindow, monkeypatch
+) -> None:
+    """Removal runs the same way: from the settings page it was asked on,
+    through the one confirm-and-run path, with the exact command recorded."""
+    from pypackhub.core.backends.base import CommandPlan
+
+    recorded: list[tuple[tuple[CommandPlan, bool], ...]] = []
+
+    class Accepting:
+        confirmed = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    service = window._packages._context.service_for(window._packages.environment)
+    monkeypatch.setattr(window._packages, "refresh", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "manager_removal_plan",
+        lambda name, action: CommandPlan(
+            argv=("python", "-m", "pip", "uninstall", "--yes", "--", name),
+            action=action,
+            label=f"uninstall {name}",
+            backend="pip",
+        ),
+    )
+    monkeypatch.setattr(service, "bootstrap_needs_elevation", lambda: False)
+    monkeypatch.setattr(packages_module, "ConfirmationDialog", Accepting)
+    monkeypatch.setattr(
+        window._packages,
+        "run_confirmed_plans",
+        lambda plans: recorded.append(tuple(plans)),
+    )
+
+    window.show_view(ViewName.SETTINGS)
+    window._settings_view.manager_remove_requested.emit("pipx")
+
+    assert window.current_view is ViewName.SETTINGS
+    assert recorded and len(recorded[0]) == 1
+    assert recorded[0][0][0].label == "uninstall pipx"
+    assert window._nav_buttons[ViewName.SETTINGS].isChecked()
+    assert not window._nav_buttons[ViewName.PACKAGES].isChecked()
+
+
+def test_the_manager_row_bar_is_wired_to_the_one_run_path(window: MainWindow) -> None:
+    """The row's bar is fed by the run, not by the settings page's own
+    guesses: the packages view's signals - started, percentage, outcome -
+    land in the settings page the window connects them to, so a run
+    started from the row is watched on the row, through the run's own
+    numbers and its own ending."""
+    bar = window._settings_view._manager_progress
+    assert bar.isHidden()
+
+    window._packages.manager_run_started.emit(True)
+    assert not bar.isHidden()
+    assert bar.maximum() == 100
+
+    window._packages.manager_progress.emit(61)
+    assert bar.value() == 61
+
+    window._packages.manager_run_finished.emit(RunOutcome.FAILED)
+    assert not bar.isHidden()
+    assert bar.property("error") is True
+
+
+def test_a_run_reveals_the_log_panel(window: MainWindow) -> None:
+    """The report: a manager install ran with the log hidden, so there was
+    nothing on screen saying it was happening. The log starts hidden as a
+    layout choice for an empty window, not a promise that runs happen in
+    the dark - the moment one starts, the window opens it."""
+    assert window._log_panel.isHidden()
+
+    window._packages.run_started.emit()
+
+    assert not window._log_panel.isHidden()
+
+
+def test_switching_pages_leaves_exactly_one_checked_nav_button(
+    window: MainWindow,
+) -> None:
+    """The report: every page ever visited kept its checked state, so the
+    sidebar read as if several pages were open at once. The buttons are
+    checkable - a click checks its own - and the window owns unchecking
+    the page the user just left."""
+    window.show_view(ViewName.HISTORY)
+    assert [name for name, button in window._nav_buttons.items() if button.isChecked()] == [
+        ViewName.HISTORY
+    ]
+
+    window.show_view(ViewName.PACKAGES)
+    assert [name for name, button in window._nav_buttons.items() if button.isChecked()] == [
+        ViewName.PACKAGES
+    ]
+
+
+def test_the_log_entry_reports_the_panel_not_the_page(window: MainWindow) -> None:
+    """The log entry is a toggle for a panel, not a page: its checked state
+    follows the panel's visibility across page switches, so the button
+    never claims the log is closed while it is showing - including the
+    moment a run opens the log on its own."""
+    window.show_view(ViewName.PACKAGES)
+    assert not window._nav_buttons[ViewName.LOGS].isChecked()
+
+    window._packages.run_started.emit()
+
+    assert window._nav_buttons[ViewName.LOGS].isChecked()
+    window.show_view(ViewName.HISTORY)
+    assert window._nav_buttons[ViewName.LOGS].isChecked()
+
+    window.set_log_panel_visible(False)
+    assert not window._nav_buttons[ViewName.LOGS].isChecked()

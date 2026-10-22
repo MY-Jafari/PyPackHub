@@ -207,10 +207,12 @@ def test_uv_needs_elevation_only_when_the_site_packages_is_not_writable(
     service = InventoryService(prefix=tmp_path, backend=UvBackend(python=Path("python")))
     action = _upgrade_action(tmp_path)
 
-    monkeypatch.setattr("pypackhub.core.inventory.site_packages_writable", lambda prefix: False)
+    # The backend answers the question now, and it reads the writability
+    # probe from the metadata module - the seam the delegation moved.
+    monkeypatch.setattr("pypackhub.core.metadata.site_packages_writable", lambda prefix: False)
     assert service.backend_needs_elevation(action)
 
-    monkeypatch.setattr("pypackhub.core.inventory.site_packages_writable", lambda prefix: True)
+    monkeypatch.setattr("pypackhub.core.metadata.site_packages_writable", lambda prefix: True)
     assert not service.backend_needs_elevation(action)
 
 
@@ -278,7 +280,9 @@ def test_an_elevated_run_goes_through_the_backends_elevated_path(
     recorded: dict[str, tuple[str, ...]] = {}
     backend = UvBackend(python=Path("python"))
 
-    def fake_execute_elevated(plan: CommandPlan, *, cancel=None, timeout=None) -> CommandResult:
+    def fake_execute_elevated(
+        plan: CommandPlan, *, cancel=None, timeout=None, on_line=None
+    ) -> CommandResult:
         recorded["argv"] = plan.argv
         return CommandResult(argv=plan.argv, returncode=0, stdout="", stderr="", duration=0.0)
 
@@ -399,3 +403,33 @@ def test_pkexec_receives_the_command_as_an_argument_list(
         "--",
         "pip",
     )
+
+
+def test_pkexec_streams_its_output_through_the_runners_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """polkit carries pipes, so an elevated run there streams its real
+    output exactly like any other command - the streaming contract is not
+    a Windows-only promise."""
+    executable = tmp_path / "fake-manager"
+    executable.write_text("", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, *, on_stdout=None, on_stderr=None, **_kwargs: object) -> CommandResult:
+        captured["stdout"] = on_stdout
+        captured["stderr"] = on_stderr
+        return CommandResult(argv=tuple(argv), returncode=0, stdout="", stderr="", duration=0.0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/bin/pkexec")
+
+    def on_line(_line: str) -> None:
+        """The listener the supervised run would feed."""
+
+    runner._run_elevated_posix(
+        (str(executable), "--version"), timeout=None, cancel=None, on_line=on_line
+    )
+
+    assert captured["stdout"] is on_line
+    assert captured["stderr"] is on_line

@@ -20,7 +20,7 @@ body:
     attributes:
       label: PyPackHub version
       description: The version shown in the About dialog, or the commit you built from.
-      placeholder: "0.1.0 / commit abc1234"
+      placeholder: "0.1.1 / commit abc1234"
     validations:
       required: true
 

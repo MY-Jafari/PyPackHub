@@ -25,6 +25,7 @@ a hostile name cannot become an option.
 
 from __future__ import annotations
 
+import os
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
@@ -63,6 +64,7 @@ __all__ = [
     "UnsupportedActionError",
     "UnsupportedBackendError",
     "iter_display_lines",
+    "script_path_in_prefix",
 ]
 
 
@@ -108,6 +110,12 @@ class BackendCapability:
     can_show_sizes: bool = False
     #: Whether the backend can install into the user site directory.
     can_install_user: bool = False
+    #: Whether this backend's commands write the selected environment at all.
+    #: pipx installs applications in its own home and never touches the
+    #: selected prefix, so questions about the selected environment - the
+    #: reachability check, the size column - are either vacuous or answered
+    #: for its own scope, never for the prefix.
+    targets_selected_environment: bool = True
     need_confirmation: bool = True
 
     def supports(self, action: ActionKind) -> bool:
@@ -222,12 +230,20 @@ class CommandPlan:
     ``argv`` is the exact sequence handed to the runner. ``display_command()``
     is derived from it, so the string shown in a confirmation dialog is the
     command that runs - not a re-rendering of the request that could differ.
+
+    ``cwd`` is part of the same promise for the project tools: poetry,
+    pipenv and pdm find *their* project by looking at the current directory,
+    so a plan that runs them is only complete when it also says where. It is
+    ``None`` for every backend that targets an explicit environment instead
+    (pip's ``--python``, conda's ``--prefix``), and the base execution path
+    hands it to the runner unchanged.
     """
 
     argv: tuple[str, ...]
     action: PackageAction
     label: str
     backend: str = ""
+    cwd: Path | None = None
 
     def display_command(self) -> str:
         """The command as it will be shown to the user, with secrets redacted."""
@@ -293,6 +309,22 @@ class Backend(ABC):
         must not spawn anything.
         """
 
+    def supports_environment(self, path: Path) -> bool:
+        """Whether this backend can act on the location at *path*.
+
+        The default says yes because a backend that targets an explicit
+        environment - pip's ``--python``, uv's ``--python``, conda's
+        ``--prefix`` - can be pointed anywhere. The backends whose manager
+        instead *finds* its target by location override this: poetry, pipenv
+        and pdm drive a project folder and would misfire on an environment,
+        conda drives conda environments and would corrupt a venv, and pip
+        without an interpreter would run a ``pip`` from the search path that
+        belongs to some other prefix. The factory asks before it hands out a
+        backend, so a manager forced in the settings never runs against a
+        location it would misread.
+        """
+        return True
+
     # ------------------------------------------------------------------
     # Shared execution
     # ------------------------------------------------------------------
@@ -316,12 +348,15 @@ class Backend(ABC):
         This is the single execution path in the project: backends do not call
         the runner themselves, so a plan cannot be run with different options
         from the ones it was built with. ``on_line`` receives each line of stdout
-        and stderr as it arrives, for the live log.
+        and stderr as it arrives, for the live log. The plan's ``cwd`` travels
+        with it, so a project tool runs inside the project the confirmation
+        described - never in whatever directory the application inherited.
         """
         return run(
             plan.argv,
             timeout=timeout,
             cancel=cancel,
+            cwd=plan.cwd,
             on_stdout=on_line,
             on_stderr=on_line,
         )
@@ -332,23 +367,51 @@ class Backend(ABC):
         *,
         cancel: threading.Event | None = None,
         timeout: float | None = DEFAULT_TIMEOUT,
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         """Run a confirmed plan through the OS's standard elevation mechanism.
 
-        The plan's own argument list runs and nothing else: the command is the
-        one the user approved, only the privileges it is granted differ (SPEC
-        section 11.5 - one action, explained beforehand, never persisted).
-        Output streaming is deliberately absent from the signature: the
-        platforms whose consent boundary carries no pipes would turn it into
-        a lie, and the caller tells the user that instead.
+        The plan's own argument list runs and nothing else: the command is
+        the one the user approved, only the privileges it is granted differ
+        (SPEC section 11.5 - one action, explained beforehand, never
+        persisted). ``on_line`` receives the run's real output as it
+        arrives - on Windows through the log file the elevated helper
+        writes and the runner follows - so a run that needs the OS's
+        consent is still a run the user can watch happening.
         """
-        return run_elevated(plan.argv, timeout=timeout, cancel=cancel)
+        return run_elevated(plan.argv, timeout=timeout, cancel=cancel, on_line=on_line)
 
     def policy_for(self, facts: InterpreterFacts) -> ModificationPolicy:
         """Default policy delegate: most backends only need the platform guard."""
         from pypackhub.core.platform_guard import modification_policy
 
         return modification_policy(facts)
+
+    def needs_elevation(self, action: PackageAction, prefix: Path) -> bool:
+        """Whether running *action* through this backend needs the OS's help.
+
+        The default answers for a backend that writes the environment at
+        *prefix*. Two capabilities short-circuit it: a backend with a
+        user-site path of its own always has somewhere writable to go as a
+        normal user (pip), and a backend whose commands never touch the
+        selected environment is judged by its own scope, never by the
+        prefix's permissions (pipx - elevating its commands would lose their
+        output to grant privileges they do not need). What remains is the
+        environment's own site-packages, and only a probe of it answers.
+
+        The project tools override this: their commands write the project
+        folder the action names, not the environment's site-packages, so that
+        is the directory probed.
+        """
+        del action
+        if self.capability.can_install_user:
+            return False
+        if not self.capability.targets_selected_environment:
+            return False
+
+        from pypackhub.core.metadata import site_packages_writable
+
+        return not site_packages_writable(prefix)
 
     def validate_package_spec(self, spec: str) -> str:
         """Reuse the core validator unless a backend needs stricter rules."""
@@ -397,6 +460,20 @@ class Backend(ABC):
             raise UnsupportedActionError(
                 f"{self.capability.name} cannot perform {action.kind.value}"
             )
+
+
+def script_path_in_prefix(prefix: Path, name: str) -> Path:
+    """Where a pip-installed command's script lands in *prefix*, before it exists.
+
+    The bootstrap flow plans the chosen manager's command before that manager
+    is installed: ``python -m pip install poetry`` puts a ``poetry`` script in
+    the environment's script directory, and this is that path, so the plan's
+    first word is a real location rather than a bare name the hardened runner
+    would refuse to resolve.
+    """
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    return prefix / scripts / f"{name}{suffix}"
 
 
 def iter_display_lines(result: CommandResult) -> Iterable[str]:

@@ -88,10 +88,15 @@ class FallbackNotice:
     *replaced* names the package manager that could not: the one the user
     chose, which cannot change what the interpreter imports for these
     packages. The backend that *will* run it is not carried - the plan's own
-    command is the dialog's answer to "who runs this".
+    command is the dialog's answer to "who runs this". *scope* says which
+    sentence explains the refusal: empty is the user-site shadowing reason,
+    and ``project``/``conda``/``environment`` mean the manager cannot manage
+    this environment at all - a forced poetry on a plain interpreter, say,
+    whatever its install state.
     """
 
     replaced: str
+    scope: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +109,16 @@ class BootstrapNotice:
     the action's own command in the preview - the approval covers the whole
     batch, one decision (SPEC section 11.7: the text shown is the data that
     runs).
+
+    ``install_only`` marks the batch the settings page starts, where
+    installing the manager is the whole decision and there is no action
+    behind it: the reason and the button say just that, and the plan the
+    dialog was built around *is* the installing command.
     """
 
     backend: str
     commands: tuple[str, ...] = ()
+    install_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +319,8 @@ class ConfirmationDialog(QDialog):
         # shown regardless.
         if elevation is not None:
             confirm_key = TranslationKey.CONFIRM_ELEVATION_BUTTON
+        elif bootstrap is not None and bootstrap.install_only:
+            confirm_key = TranslationKey.CONFIRM_MANAGER_INSTALL_BUTTON
         elif bootstrap is not None:
             confirm_key = TranslationKey.CONFIRM_BOOTSTRAP_BUTTON
         elif fallback is not None:
@@ -421,25 +434,42 @@ class ConfirmationDialog(QDialog):
     def _describe_fallback(self) -> None:
         """Say that this command is another backend's, and why it had to be.
 
-        The backend the user chose cannot change what the interpreter imports
-        for these packages, so the same action was re-planned through the one
-        backend that can. The substitution is the one thing here that must be
-        consented to explicitly: the dialog shows the other backend's own
-        exact command, and the action button names it (SPEC section 11.7 -
-        the text shown is the data that runs).
+        The backend the user chose could not run the action, so the same
+        action was re-planned through the one backend that can. Two reasons
+        exist and they must not be confused: the chosen backend cannot
+        *reach* these packages (their imported copy lives in the user
+        site), or it cannot manage this *environment at all* - a forced
+        poetry on a plain interpreter, which no install of poetry fixes.
+        The substitution is the one thing here that must be consented to
+        explicitly: the dialog shows the other backend's own exact command,
+        and the action button names it (SPEC section 11.7 - the text shown
+        is the data that runs).
         """
         if self._fallback is None:
             return
 
         translator = self._translator
+        if self._fallback.scope:
+            scope_keys = {
+                "project": TranslationKey.CONFIRM_FALLBACK_SCOPE_PROJECT,
+                "conda": TranslationKey.CONFIRM_FALLBACK_SCOPE_CONDA,
+                "environment": TranslationKey.CONFIRM_FALLBACK_SCOPE_ENV,
+            }
+            reason = translator.translate(
+                scope_keys.get(self._fallback.scope, TranslationKey.CONFIRM_FALLBACK_SCOPE_PROJECT),
+                backend=self._fallback.replaced,
+            )
+        else:
+            reason = translator.translate(
+                TranslationKey.CONFIRM_FALLBACK_REASON,
+                backend=self._fallback.replaced,
+                packages=self._plan.action.display_target(),
+            )
+
         text = "\n\n".join(
             (
                 translator.translate(TranslationKey.CONFIRM_FALLBACK_TITLE),
-                translator.translate(
-                    TranslationKey.CONFIRM_FALLBACK_REASON,
-                    backend=self._fallback.replaced,
-                    packages=self._plan.action.display_target(),
-                ),
+                reason,
             )
         )
 
@@ -460,12 +490,15 @@ class ConfirmationDialog(QDialog):
             return
 
         translator = self._translator
+        reason_key = (
+            TranslationKey.CONFIRM_MANAGER_INSTALL_REASON
+            if self._bootstrap.install_only
+            else TranslationKey.CONFIRM_BOOTSTRAP_REASON
+        )
         text = "\n\n".join(
             (
                 translator.translate(TranslationKey.CONFIRM_BOOTSTRAP_TITLE),
-                translator.translate(
-                    TranslationKey.CONFIRM_BOOTSTRAP_REASON, backend=self._bootstrap.backend
-                ),
+                translator.translate(reason_key, backend=self._bootstrap.backend),
             )
         )
 

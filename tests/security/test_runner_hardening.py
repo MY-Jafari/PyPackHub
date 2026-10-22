@@ -296,3 +296,70 @@ def test_display_command_redacts_credentials() -> None:
 
     assert "secret" not in shown
     assert "mirror.example" in shown
+
+
+# ---------------------------------------------------------------------------
+# The elevated half's output: the file the helper writes, and the helper itself
+# ---------------------------------------------------------------------------
+
+
+def test_the_output_file_tail_yields_whole_lines_only(tmp_path: Path) -> None:
+    """An elevated run's window onto the run: whole lines, held halves, and
+    the pip-style carriage-return updates as one line each."""
+    from pypackhub.core.runner import _OutputFileTail
+
+    target = tmp_path / "elevated.log"
+    tail = _OutputFileTail(target)
+    assert tail.drain() == []
+
+    target.write_text("Collecting pipx\nDownl", encoding="utf-8")
+    assert tail.drain() == ["Collecting pipx"]
+
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write("oading pipx\n  61%\rSuccessfully installed\n")
+    assert tail.drain() == ["Downloading pipx", "  61%", "Successfully installed"]
+
+    assert tail.drain() == []
+
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write("half a line without its terminator")
+    assert tail.drain() == []
+    assert tail.flush() == ["half a line without its terminator"]
+    assert tail.flush() == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the elevated helper is a Windows mechanism")
+def test_the_elevated_helper_runs_one_command_into_its_log(tmp_path: Path) -> None:
+    """The helper's whole contract, against a real child: start the one
+    approved command, put its output in the log, exit as it did."""
+    from pypackhub.core import elevated_helper
+
+    log = tmp_path / "helper.log"
+    code = elevated_helper.main([str(log), PYTHON, "-c", "print('hello from the elevated half')"])
+
+    assert code == 0
+    assert "hello from the elevated half" in log.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the elevated helper is a Windows mechanism")
+def test_the_elevated_helper_exits_with_the_command_it_ran(tmp_path: Path) -> None:
+    from pypackhub.core import elevated_helper
+
+    log = tmp_path / "helper.log"
+    code = elevated_helper.main([str(log), PYTHON, "-c", "raise SystemExit(3)"])
+
+    assert code == 3
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the elevated helper is a Windows mechanism")
+def test_the_elevated_helper_refuses_anything_but_an_absolute_executable(
+    tmp_path: Path,
+) -> None:
+    """The helper never re-resolves a program name - a lookup on the
+    elevated side is a lookup this application does not control."""
+    from pypackhub.core import elevated_helper
+
+    log = tmp_path / "helper.log"
+    assert elevated_helper.main([str(log), "python", "-c", "print('x')"]) == 2
+    assert elevated_helper.main([str(log)]) == 2
+    assert not log.exists() or log.read_text(encoding="utf-8") == ""

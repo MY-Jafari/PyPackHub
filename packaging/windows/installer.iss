@@ -3,8 +3,8 @@
 ; The release workflow runs this on the Windows runner after PyInstaller has
 ; produced dist/PyPackHub, and names the result after the version:
 ;
-;   iscc /DAppVersion=0.1.0 packaging\windows\installer.iss
-;   -> release\PyPackHub-0.1.0-windows-x86_64-setup.exe
+;   iscc /DAppVersion=0.1.1 packaging\windows\installer.iss
+;   -> release\PyPackHub-0.1.1-windows-x86_64-setup.exe
 ;
 ; Two deliberate choices:
 ;
@@ -25,7 +25,7 @@
 ; treats as the base for Source, OutputDir and SetupIconFile, but an absolute
 ; path removes the question entirely and makes a mis-invocation obvious.
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 
 #ifndef BundleDir
