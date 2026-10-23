@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from pypackhub.core.environments import DEFAULT_SEARCH_ROOTS, detected_environments
+from pypackhub.core.environments import default_search_roots, detected_environments
 from pypackhub.core.inventory import InventoryService
 from pypackhub.core.platform_guard import current_prefix
 from pypackhub.core.tasks import TaskManager
@@ -138,14 +138,17 @@ class DefaultInventoryProvider:
     def environments(self) -> tuple[Path, ...]:
         """Environments to offer: the built-in roots, plus this project's ``.venv``.
 
-        The discovery is intentionally shallow (it looks at the immediate children
-        of a few well-known directories) because a full scan is Phase 3 work. The
-        working directory is added because a developer's ``.venv`` next to the
-        project they opened is the environment they almost always mean, and the
-        registered folders are added because they are the one way to reach a
-        conda environment outside the roots or a poetry/pipenv/pdm project.
+        The built-in roots are the platform-aware ones - the portable
+        version-manager homes plus conda's ``envs`` directories - and the
+        machine's standard installs are offered by the discovery itself,
+        which is how a frozen build finds real Pythons whose parents it
+        must not scan. The working directory is added because a developer's
+        ``.venv`` next to the project they opened is the environment they
+        almost always mean, and the registered folders are added because
+        they are the one way to reach a conda environment outside the
+        roots or a poetry/pipenv/pdm project.
         """
-        roots: list[Path] = list(DEFAULT_SEARCH_ROOTS)
+        roots: list[Path] = list(default_search_roots())
         if self._search_working_directory:
             roots.append(Path.cwd())
 

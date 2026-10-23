@@ -27,6 +27,9 @@ from pypackhub.core.platform_guard import (
     EnvironmentKind,
     InterpreterFacts,
     inspect,
+    is_frozen_build,
+    standard_interpreter_prefix,
+    standard_python_prefixes,
 )
 from pypackhub.core.runner import CommandResult, run
 from pypackhub.core.validation import is_verified_environment
@@ -38,6 +41,7 @@ __all__ = [
     "EnvironmentSource",
     "SystemInfo",
     "create_environment",
+    "default_search_roots",
     "detected_environments",
     "infer_purpose",
     "system_info",
@@ -55,8 +59,42 @@ DEFAULT_SEARCH_ROOTS: Final = (
 
 
 def _default_search_roots() -> tuple[Path, ...]:
-    """Return DEFAULT_SEARCH_ROOTS, keeping only the ones that exist on disk."""
-    return tuple(root for root in DEFAULT_SEARCH_ROOTS if root.is_dir())
+    """The roots worth scanning: the portable ones plus conda's ``envs``.
+
+    The constant above covers the homes of per-user version managers and
+    venv folders; conda's named environments live in an ``envs`` directory
+    beside each base install, and those bases sit in the home directory,
+    in ``ProgramData`` or under ``/opt`` depending on how the installer
+    ran, so the ones that exist are collected rather than spelled out.
+    """
+
+    roots = [root for root in DEFAULT_SEARCH_ROOTS if root.is_dir()]
+
+    for base in standard_python_prefixes():
+        if (base / "conda-meta").is_dir():
+            envs = base / "envs"
+            if envs.is_dir():
+                roots.append(envs)
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for root in roots:
+        resolved = root.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return tuple(unique)
+
+
+def default_search_roots() -> tuple[Path, ...]:
+    """The built-in roots a caller can extend with its own.
+
+    The default provider adds the working directory to these; anything
+    that wants exactly the conservative scan uses them as they are.
+    """
+
+    return _default_search_roots()
 
 
 class EnvironmentSource(Enum):
@@ -178,7 +216,26 @@ def create_environment(
         raise CreateEnvironmentError(f"parent of {resolved_location!s} does not exist")
 
     if interpreter is None:
-        selected_interpreter = Path(sys.executable).resolve()
+        if is_frozen_build():
+            # The bundle is its own runtime: its executable is the
+            # application, and "``PyPackHub.exe -m venv``" would create
+            # nothing. The honest default is the best real Python on the
+            # machine, and a machine with none gets a refusal rather than
+            # a venv built by something that is not an interpreter.
+            discovered = standard_interpreter_prefix()
+            if discovered is None:
+                raise CreateEnvironmentError(
+                    "the bundled application carries no Python interpreter; "
+                    "install Python or choose an interpreter explicitly"
+                )
+            found_interpreter = inspect(discovered).executable
+            if found_interpreter is None:  # pragma: no cover - the prefix proved one
+                raise CreateEnvironmentError(
+                    "no usable Python interpreter was found on this machine"
+                )
+            selected_interpreter = found_interpreter
+        else:
+            selected_interpreter = Path(sys.executable).resolve()
     else:
         # The absoluteness check has to happen on what the caller gave us, before
         # ``resolve()`` turns any path into an absolute one - otherwise a relative
@@ -294,9 +351,15 @@ def detected_environments(
 ) -> EnvironmentListing:
     """Discover Python environments under the given roots.
 
-    The running interpreter is included separately so it is always present even
-    when it does not live under a scanned root. Environments are returned in a
-    stable order so the UI does not reshuffle them between refreshes.
+    The machine's standard installs are offered first - an all-users
+    Python, the per-user one, conda's bases - because they are the
+    environments "the system Python" means, and in a frozen build they
+    are the only way to find one: the bundle's own prefix is a runtime
+    folder, not an interpreter, so it is never offered as an environment
+    there. In a source checkout the running interpreter is appended
+    separately so it is always present even when it lives under none of
+    the scanned roots. Environments are returned in a stable order so the
+    UI does not reshuffle them between refreshes.
 
     ``registered`` are the folders the user pointed the application at:
     they are offered when they are still on disk and look like an
@@ -307,6 +370,31 @@ def detected_environments(
 
     found: list[ListedEnvironment] = []
     seen: set[Path] = set()
+
+    # The standard installs are direct candidates rather than scan results
+    # because their parents are too big to walk (all of ``Program Files``,
+    # all of ``/usr``) and a conda base lives at the top of its install
+    # rather than inside a versions directory.
+    for candidate in standard_python_prefixes():
+        resolved = candidate
+        if resolved in seen:
+            continue
+        try:
+            facts = inspect(resolved)
+        except OSError:
+            continue
+        if not _is_interesting_environment(facts):
+            continue
+        if facts.executable is None and facts.kind is not EnvironmentKind.SYSTEM:
+            continue
+        seen.add(resolved)
+        found.append(
+            ListedEnvironment(
+                prefix=resolved,
+                facts=facts,
+                source=EnvironmentSource.SCAN,
+            )
+        )
 
     for root in scanned:
         try:
@@ -385,7 +473,10 @@ def detected_environments(
             )
         )
 
-    if include_running:
+    if include_running and not is_frozen_build():
+        # In a frozen build ``sys.prefix`` is the application's own runtime
+        # folder - the one prefix that must never be offered as an
+        # environment. The standard installs above take its place.
         running = Path(sys.prefix).resolve()
         if running not in seen:
             with contextlib.suppress(OSError):

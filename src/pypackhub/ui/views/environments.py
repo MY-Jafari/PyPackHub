@@ -28,10 +28,10 @@ from PySide6.QtWidgets import (
 )
 
 from pypackhub.core.environments import (
-    DEFAULT_SEARCH_ROOTS,
     EnvironmentListing,
     EnvironmentSource,
     ListedEnvironment,
+    default_search_roots,
     detected_environments,
 )
 from pypackhub.core.platform_guard import EnvironmentKind, InterpreterFacts
@@ -170,7 +170,7 @@ class EnvironmentsView(QWidget):
         if self._load_task:
             return
 
-        roots: list[Path] = list(DEFAULT_SEARCH_ROOTS)
+        roots: list[Path] = list(default_search_roots())
         roots.append(Path.cwd())
         registered = tuple(
             Path(path) for path in self._shell.settings.registered_environments if path.strip()

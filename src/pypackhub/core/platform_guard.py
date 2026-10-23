@@ -32,8 +32,11 @@ __all__ = [
     "detect_kind",
     "find_externally_managed_marker",
     "inspect",
+    "is_frozen_build",
     "is_windows_app_alias_stub",
     "modification_policy",
+    "standard_interpreter_prefix",
+    "standard_python_prefixes",
 ]
 
 #: Directory Windows uses for the zero-byte ``python.exe`` stubs that only open
@@ -244,9 +247,147 @@ def inspect(prefix: Path, *, executable: Path | None = None) -> InterpreterFacts
 
 
 def current_prefix() -> Path:
-    """The prefix of the interpreter this application is running under."""
+    """The prefix of the interpreter this application is running under.
+
+    A frozen build is its own runtime rather than a Python installation:
+    its ``sys.executable`` is the application and its ``sys.prefix`` is
+    the bundle's internal folder, neither of which any package could be
+    installed with. The honest answer there is the best real Python on
+    the machine; only a machine with no Python at all falls back to the
+    bundle folder, because every caller needs *some* path and nothing can
+    be listed for it anyway.
+    """
+
+    if is_frozen_build():
+        discovered = standard_interpreter_prefix()
+        if discovered is not None:
+            return discovered
 
     return Path(sys.prefix).resolve()
+
+
+def is_frozen_build() -> bool:
+    """Whether this application is the PyInstaller bundle, not a Python.
+
+    PyInstaller sets ``sys.frozen``; every piece of code that would
+    otherwise trust ``sys.executable`` or ``sys.prefix`` as a Python
+    interpreter has to ask this first, because in the bundle both point
+    at the application itself - the one prefix that must never be offered
+    to the user as an environment.
+    """
+
+    return bool(getattr(sys, "frozen", False))
+
+
+#: The names conda's usual installers give their base directories. A base
+#: directory is itself an environment (it carries ``conda-meta``), which is
+#: why the prefixes are offered directly rather than only as parents.
+_CONDA_BASE_NAMES: Final = ("anaconda3", "miniconda3", "miniforge3", "mambaforge")
+
+
+def _conda_base_prefixes() -> list[Path]:
+    """The conda installs this machine plausibly carries, bases only.
+
+    Nothing is spawned to ask conda where it lives: the installers'
+    documented locations are checked on disk, and the ones that are not
+    there cost one ``stat`` each. All-users installs land under
+    ``ProgramData`` on Windows, per-user ones under the home directory on
+    every platform.
+    """
+
+    home = Path.home()
+    bases = [home / name for name in _CONDA_BASE_NAMES]
+
+    program_data = os.environ.get("PROGRAMDATA", "")
+    if program_data:
+        bases.extend(Path(program_data) / name for name in _CONDA_BASE_NAMES)
+
+    # The all-users locations conda's installers offer on Linux and macOS.
+    bases.extend(
+        Path(f"/opt/{name}") for name in ("conda", "anaconda3", "miniconda3", "miniforge3")
+    )
+    return [base for base in bases if base.is_dir()]
+
+
+def standard_python_prefixes() -> tuple[Path, ...]:
+    """Where a real Python is installed on this machine, best first.
+
+    Pure layout knowledge - globs and ``stat`` calls, nothing spawned - so
+    it is cheap enough to call anywhere. The order is this module's answer
+    to "which Python is *the* Python here", and it is deliberate: an
+    all-users install before a per-user one, the python.org framework
+    before the package manager's, conda's bases before the interpreter
+    the operating system itself ships.
+
+    The prefixes are offered *directly* - not through the search roots the
+    discovery walks - because their parents are too big to scan (all of
+    ``Program Files``, all of ``/usr``) and a conda base lives at the top
+    of its install rather than inside a versions directory.
+    """
+
+    candidates: list[Path] = []
+
+    if sys.platform == "win32":
+        program_files = os.environ.get("PROGRAMFILES", "")
+        program_files_x86 = os.environ.get("PROGRAMFILES(X86)", "")
+        local_programs = os.environ.get("LOCALAPPDATA", "")
+        if program_files:
+            candidates.extend(sorted(Path(program_files).glob("Python*")))
+        if program_files_x86:
+            candidates.extend(sorted(Path(program_files_x86).glob("Python*")))
+        if local_programs:
+            candidates.extend(
+                sorted((Path(local_programs) / "Programs" / "Python").glob("Python*"))
+            )
+        candidates.extend(_conda_base_prefixes())
+    elif sys.platform == "darwin":
+        candidates.extend(
+            sorted(Path("/Library/Frameworks/Python.framework/Versions").glob("[0-9]*"))
+        )
+        candidates.extend(_conda_base_prefixes())
+        for homebrew in ("/opt/homebrew", "/usr/local"):
+            if Path(homebrew).is_dir():
+                candidates.append(Path(homebrew))
+    else:
+        candidates.extend(_conda_base_prefixes())
+        candidates.append(Path("/usr/local"))
+
+    # The interpreter the distribution ships comes last on every POSIX
+    # platform: it exists on almost all of them, but it is the one with
+    # the strictest write policy (PEP 668) and the least likely to be the
+    # environment the user actually means.
+    if os.name == "posix":
+        candidates.append(Path("/usr"))
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        try:
+            if not candidate.is_dir():
+                continue
+            resolved = candidate.resolve()
+        except OSError:  # pragma: no cover - a broken mount answers here
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return tuple(unique)
+
+
+def standard_interpreter_prefix() -> Path | None:
+    """The best real Python prefix on this machine, or ``None``.
+
+    "Best" is the first of :func:`standard_python_prefixes` that actually
+    carries an interpreter, so a frozen build - whose own ``sys.prefix``
+    is its runtime folder - has a truthful answer to "which Python is
+    the Python here" without spawning anything.
+    """
+
+    for prefix in standard_python_prefixes():
+        if _find_executable(prefix, None) is not None:
+            return prefix
+    return None
 
 
 def modification_policy(facts: InterpreterFacts, *, override: bool = False) -> ModificationPolicy:

@@ -715,6 +715,26 @@ installed and the modal helper answers itself - while a test that is
 generalisation: the suite's environment is part of its input, and the only
 way to keep a green run green is to take that input out of the picture.
 
+**A frozen build is not a Python.** The first shipped build answered
+"which environment is current?" with its own install folder, found none
+of the machine's Pythons, and offered none of its environments. The
+cause is structural: PyInstaller makes ``sys.executable`` the application
+and ``sys.prefix`` the bundle's internal directory, so every piece of
+code that trusted either as an interpreter - the default environment,
+the venv dialog's default interpreter, the "running environment" entry -
+was pointing at the one prefix that cannot run anything. The fix has
+three legs: ``is_frozen_build()`` names the condition once;
+``standard_python_prefixes()`` answers "where does a real Python live on
+this machine?" with pure layout knowledge (the python.org install
+directories, conda's bases, the distribution's own ``/usr``) - globs and
+``stat`` calls, nothing spawned, offered *directly* rather than scanned
+because their parents (all of Program Files, all of ``/usr``) are too
+big to walk; and the discovery never lists the bundle's runtime as an
+environment. The lesson generalises past PyInstaller: an application
+that manages other interpreters must never mistake its own runtime for
+one, and "where are the real ones?" is a layout question it has to be
+able to answer without running anything.
+
 **Consciously deferred.** Channel search for conda (the search view stays
 PyPI-based; conda lookups there are advisory the same way every listing-based
 check is), conda environment *creation* in the environments view, binding a

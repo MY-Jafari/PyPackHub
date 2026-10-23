@@ -179,5 +179,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `certifi` is pinned to `2026.10.19` in both lock files: `PYSEC-2026-4320`
   affects `2026.7.22`, and the weekly dependency audit fails on a pinned
   package with a known advisory.
+- The bundled (PyInstaller) build detected no Python on the machine it ran
+  on and offered its own install folder as the default environment: in a
+  frozen build `sys.executable` is the application and `sys.prefix` its
+  runtime folder, neither of which is an interpreter. The bundle's runtime
+  is never listed as an environment now, the machine's standard installs
+  (the python.org directories, conda's bases and `envs`, the
+  distribution's own Python) are discovered directly without scanning
+  their parents, and the virtual-environment dialog's default interpreter
+  is a real Python found on the machine rather than the bundle's own
+  executable.
 
 [0.1.1]: https://github.com/MY-Jafari/PyPackHub/compare/v0.1.0...v0.1.1
